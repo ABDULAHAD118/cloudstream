@@ -9,8 +9,7 @@ which is still a placeholder.
 
 1. From the latest **Mac build** release, download `-intel.dmg` for an Intel Mac or `-apple-silicon.dmg` for an M-series Mac, then drag CloudStream to Applications.
 2. The first launch is blocked because the app isn't notarized. Go to System Settings → Privacy & Security → **Open Anyway**.
-3. Install [IINA](https://iina.io) (recommended) or [VLC](https://www.videolan.org). Videos play in whichever one is installed.
-4. Open **Extensions**. The official repo is already added. Add more from **Community repositories** (the directory
+3. Open **Extensions**. The official repo is already added. Add more from **Community repositories** (the directory
    the Android setup screen links to), or paste a link: a `repo.json` URL, a GitHub project URL, or a `cloudstreamrepo://` link.
 
 App data (repos, installed extensions, converted jars) lives in `~/Library/Application Support/CloudStream`.
@@ -27,12 +26,17 @@ calls any other Android API, it fails with an error shown under **Installed**.
 - Repositories: the official repo is added on first launch, the community directory can be browsed, and you can add, remove, install, update, and remove extensions.
   The extension list filters by type (Movie, Anime, TV Series, …), language, and search, like on Android. SHA-256 hashes are checked the same way the Android app checks them.
 - Home page per provider, search across all providers, and title pages for movies, series (by season), anime (dub/sub), and live streams.
-- Link loading. Clicking a link opens it in IINA (all headers are sent) or VLC (only Referer and User-Agent are sent). Subtitles are downloaded and passed to the player.
+- Built-in player (libVLC, bundled in the DMG). It has play/pause, a seek bar, ±10 s, Skip OP (+85 s, like Android),
+  0.25–3× speed, volume up to 200 %, fullscreen, and source, subtitle and audio-track menus. It also plays the next episode
+  automatically or with **Next**, resumes where you stopped, and switches to the next source when one fails.
+  Streams that need extra headers (cookies, Origin, tokens) go through a local proxy that adds them, as ExoPlayer does on Android.
+- Keyboard: Space/K play-pause, ←/→ or J/L ±10 s, ↑/↓ volume, M mute, F fullscreen, N next episode, [ ] speed, Esc exit.
+- "Open in IINA/VLC" hands the current stream to an external player if you prefer one.
 
 ## What's missing (compared with Android)
 
-- Built-in player and its features: watch progress, resume, skip intro, and playback speed presets. The player is external.
-- Downloads, library and bookmarks, watch history, and continue watching.
+- Player extras: AniSkip intro/outro timestamps, subtitle styling and sync offset, Picture-in-Picture, DASH streams that need headers.
+- Downloads, library and bookmarks, watch history, and the continue-watching row (resume positions are saved, though).
 - Account sync (AniList, MAL, Simkl, Trakt), subtitle search providers, backup and restore.
 - Chromecast and FCast. Torrent titles.
 - Extension settings screens (they're Android views), plus extensions that need WebView or Cloudflare bypass

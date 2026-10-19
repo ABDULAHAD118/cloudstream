@@ -29,6 +29,8 @@ kotlin {
             }
             // Converts Android DEX extensions (.cs3) to JVM bytecode at install time
             implementation("de.femtopedia.dex2jar:dex-tools:2.4.28")
+            // In-app player: Java bindings to libVLC (bundled into the DMG by CI)
+            implementation("uk.co.caprica:vlcj:4.11.0")
             implementation(project(":shared"))
             implementation(project(":library"))
         }
@@ -61,6 +63,8 @@ compose.desktop {
             packageVersion = (findProperty("macAppVersion") as String?) ?: "1.0.0"
             // shortcut: bundles the whole JRE instead of a jlink-minimised one, since extensions can touch any JDK module
             includeAllModules = true
+            // CI drops libVLC into resources/macos-<arch>/vlc for the in-app player (see mac-release.yml)
+            appResourcesRootDir.set(project.layout.projectDirectory.dir("resources"))
             macOS {
                 bundleID = "io.github.abdulahad118.cloudstream"
                 iconFile.set(project.file("icon.icns"))

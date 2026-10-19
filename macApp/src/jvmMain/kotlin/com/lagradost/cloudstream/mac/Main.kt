@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -27,7 +28,6 @@ import androidx.compose.ui.window.rememberWindowState
 import coil3.compose.AsyncImage
 import com.lagradost.cloudstream.mac.Screen.*
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream4.theme.CloudStreamTheme
 import com.lagradost.cloudstream4.theme.CloudStreamThemeMode
 import kotlinx.coroutines.Dispatchers
@@ -42,7 +42,7 @@ sealed interface Screen {
     data object Search : Screen
     data object ExtensionsTab : Screen
     data class Result(val api: MainAPI, val item: SearchResponse) : Screen
-    data class Links(val api: MainAPI, val title: String, val data: String) : Screen
+    data class Play(val api: MainAPI, val items: List<PlayItem>, val index: Int) : Screen
 }
 
 /** APIHolder isn't observable, so the UI re-reads it after extensions load or change. */
@@ -63,23 +63,25 @@ fun main() = application {
         Providers.refresh()
         Providers.loading = false
     }
-    Window(
-        onCloseRequest = ::exitApplication,
-        title = "CloudStream",
-        state = rememberWindowState(size = DpSize(1200.dp, 800.dp)),
-    ) {
-        CloudStreamTheme(mode = CloudStreamThemeMode.Dark) {
-            Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) { App() }
+    val windowState = rememberWindowState(size = DpSize(1200.dp, 800.dp))
+    Window(onCloseRequest = ::exitApplication, title = "CloudStream", state = windowState) {
+        CompositionLocalProvider(LocalWindowState provides windowState) {
+            CloudStreamTheme(mode = CloudStreamThemeMode.Dark) {
+                Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxSize()) { App() }
+            }
         }
     }
 }
 
 @Composable
-fun App() {
-    val stack = remember { mutableStateListOf<Screen>(Home) }
+fun App(start: List<Screen> = listOf(Home)) {
+    val stack = remember { start.toMutableStateList() }
     val current = stack.last()
     fun open(screen: Screen) = stack.add(screen)
     fun tab(screen: Screen) { stack.clear(); stack.add(screen) }
+
+    // The player takes the whole window, like Android's fullscreen player
+    if (current is Play) return PlayerScreen(current.api, current.items, current.index) { stack.removeLast() }
 
     Row {
         NavigationRail {
@@ -101,7 +103,7 @@ fun App() {
                 Search -> SearchScreen(::open)
                 ExtensionsTab -> ExtensionsScreen()
                 is Result -> ResultScreen(current, ::open)
-                is Links -> LinksScreen(current)
+                is Play -> Unit
             }
         }
     }
@@ -228,7 +230,7 @@ fun ResultScreen(screen: Result, open: (Screen) -> Unit) {
     }
     error?.let { Text("Couldn't load: $it", color = MaterialTheme.colorScheme.error); return }
     val res = response ?: run { CircularProgressIndicator(); return }
-    val play = { title: String, data: String -> open(Links(screen.api, title, data)) }
+    val play = { items: List<PlayItem>, index: Int -> open(Play(screen.api, items, index)) }
 
     Row(Modifier.fillMaxSize()) {
         Column(Modifier.width(300.dp).verticalScroll(rememberScrollState())) {
@@ -245,8 +247,8 @@ fun ResultScreen(screen: Result, open: (Screen) -> Unit) {
         Spacer(Modifier.width(24.dp))
         Column(Modifier.weight(1f)) {
             when (res) {
-                is MovieLoadResponse -> Button(onClick = { play(res.name, res.dataUrl) }) { Text("▶ Play") }
-                is LiveStreamLoadResponse -> Button(onClick = { play(res.name, res.dataUrl) }) { Text("▶ Watch live") }
+                is MovieLoadResponse -> Button(onClick = { play(listOf(PlayItem(res.name, res.dataUrl)), 0) }) { Text("▶ Play") }
+                is LiveStreamLoadResponse -> Button(onClick = { play(listOf(PlayItem(res.name, res.dataUrl)), 0) }) { Text("▶ Watch live") }
                 is TvSeriesLoadResponse -> EpisodeList(mapOf("Episodes" to res.episodes), res.name, play)
                 is AnimeLoadResponse -> EpisodeList(res.episodes.mapKeys { it.key.name }, res.name, play)
                 else -> Text("This kind of title (${res.type.name}) isn't supported in the Mac app yet.")
@@ -256,7 +258,7 @@ fun ResultScreen(screen: Result, open: (Screen) -> Unit) {
 }
 
 @Composable
-fun EpisodeList(groups: Map<String, List<Episode>>, showName: String, play: (String, String) -> Unit) {
+fun EpisodeList(groups: Map<String, List<Episode>>, showName: String, play: (List<PlayItem>, Int) -> Unit) {
     val nonEmpty = groups.filterValues { it.isNotEmpty() }
     if (nonEmpty.isEmpty()) { Text("No episodes."); return }
     var group by remember(nonEmpty) { mutableStateOf(nonEmpty.keys.first()) }
@@ -274,52 +276,16 @@ fun EpisodeList(groups: Map<String, List<Episode>>, showName: String, play: (Str
                 modifier = Modifier.padding(end = 6.dp))
         }
     }
+    val episodes = seasons[season].orEmpty()
+    fun label(ep: Episode) = listOfNotNull(ep.episode?.let { "E$it" }, ep.name).joinToString(" · ").ifBlank { "Episode" }
+    // The whole season becomes the player's playlist, which is what "Next" and autoplay walk through
+    val playlist = episodes.map { PlayItem("$showName - ${label(it)}", it.data) }
     LazyColumn {
-        items(seasons[season].orEmpty()) { ep ->
-            val label = listOfNotNull(ep.episode?.let { "E$it" }, ep.name).joinToString(" · ").ifBlank { "Episode" }
+        itemsIndexed(episodes) { i, ep ->
             ListItem(
-                headlineContent = { Text(label) },
+                headlineContent = { Text(label(ep)) },
                 supportingContent = ep.description?.let { { Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis) } },
-                modifier = Modifier.clickable { play("$showName - $label", ep.data) },
-            )
-        }
-    }
-}
-
-@Composable
-fun LinksScreen(screen: Links) {
-    val links = remember(screen) { mutableStateListOf<ExtractorLink>() }
-    val subtitles = remember(screen) { mutableStateListOf<SubtitleFile>() }
-    var loading by remember(screen) { mutableStateOf(true) }
-    var message by remember(screen) { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-
-    LaunchedEffect(screen) {
-        withContext(Dispatchers.IO) {
-            runCatching {
-                screen.api.loadLinks(screen.data, false, { subtitles.add(it) }, { links.add(it) })
-            }.onFailure { message = "Loading links failed: ${it.message ?: it}" }
-        }
-        loading = false
-    }
-
-    Text(screen.title, style = MaterialTheme.typography.titleLarge)
-    Text(
-        "Player: ${Player.available ?: "none found (install IINA or VLC)"} · ${subtitles.size} subtitles",
-        style = MaterialTheme.typography.bodySmall,
-    )
-    message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 8.dp))
-    if (!loading && links.isEmpty()) Text("No links found.")
-    LazyColumn {
-        items(links.distinctBy { it.url }.sortedByDescending { it.quality }) { link ->
-            ListItem(
-                headlineContent = { Text(link.name) },
-                supportingContent = { Text("${link.source} · ${if (link.quality > 0) "${link.quality}p" else "auto"} · ${link.type}") },
-                modifier = Modifier.clickable {
-                    message = "Opening in ${Player.available ?: "player"}…"
-                    scope.launch(Dispatchers.IO) { message = Player.play(link, screen.title, subtitles.toList()) ?: "Playing in ${Player.available}" }
-                },
+                modifier = Modifier.clickable { play(playlist, i) },
             )
         }
     }

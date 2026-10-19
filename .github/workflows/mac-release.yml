@@ -27,8 +27,18 @@ jobs:
     strategy:
       matrix:
         include:
-          - { arch: x86_64, runner: macos-15-intel, label: intel }
-          - { arch: arm64, runner: macos-15, label: apple-silicon }
+          - arch: x86_64
+            runner: macos-15-intel
+            label: intel
+            resources: macos-x64
+            vlc: vlc-3.0.24-intel64.dmg
+            vlc_sha256: 1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707
+          - arch: arm64
+            runner: macos-15
+            label: apple-silicon
+            resources: macos-arm64
+            vlc: vlc-3.0.24-arm64.dmg
+            vlc_sha256: 64a89d93cdd30b0e97131743e246373db82d6826ea882d265d46d74b136da2b7
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
@@ -46,6 +56,18 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # The in-app player needs libVLC; bundling it means users don't have to install VLC
+      - name: Bundle libVLC
+        run: |
+          set -euo pipefail
+          curl -fsSL -o vlc.dmg "https://download.videolan.org/pub/videolan/vlc/3.0.24/macosx/${{ matrix.vlc }}"
+          echo "${{ matrix.vlc_sha256 }}  vlc.dmg" | shasum -a 256 -c
+          mnt="$(hdiutil attach -nobrowse -readonly vlc.dmg | tail -1 | awk -F'\t' '{print $NF}')"
+          dest="macApp/resources/${{ matrix.resources }}/vlc"
+          mkdir -p "$dest"
+          cp -R "$mnt/VLC.app/Contents/MacOS/lib" "$mnt/VLC.app/Contents/MacOS/plugins" "$dest/"
+          hdiutil detach "$mnt"
+
       - name: Test and build app
         run: ./gradlew :macApp:jvmTest :macApp:createDistributable -PmacAppVersion=1.0.${GITHUB_RUN_NUMBER}
 
@@ -53,6 +75,7 @@ jobs:
         run: |
           lipo "$APP/Contents/MacOS/CloudStream" -verify_arch ${{ matrix.arch }}
           lipo "$APP/Contents/runtime/Contents/Home/lib/libjli.dylib" -verify_arch ${{ matrix.arch }}
+          lipo "$(find "$APP" -name libvlccore.dylib | head -1)" -verify_arch ${{ matrix.arch }}
 
       # Apple Silicon refuses to launch unsigned code, so sign ad-hoc (no Apple Developer account needed)
       - name: Sign ad-hoc and package DMG
