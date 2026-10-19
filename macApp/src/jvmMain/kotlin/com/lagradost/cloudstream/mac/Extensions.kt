@@ -1,6 +1,5 @@
 package com.lagradost.cloudstream.mac
 
-import android.content.Context
 import com.googlecode.d2j.dex.Dex2jar
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.TvType
@@ -15,7 +14,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import java.net.URLClassLoader
 import java.security.MessageDigest
 import java.util.zip.ZipFile
 
@@ -173,11 +171,11 @@ object Extensions {
                 zip.getInputStream(entry).reader().readText()
             }
             val manifest = parseJson(manifestJson, BasePlugin.Manifest::class)
-            val loader = URLClassLoader(arrayOf(jar.toURI().toURL()), javaClass.classLoader)
+            val loader = ExtensionClassLoader(jar, javaClass.classLoader)
             val instance = loader.loadClass(manifest.pluginClassName).getDeclaredConstructor().newInstance() as BasePlugin
             instance.filename = cs3.absolutePath
             loaded[internalName] = instance
-            if (instance is Plugin) instance.load(Context()) else instance.load()
+            if (instance is Plugin) instance.load(loader.hostContext()) else instance.load()
             loadErrors.remove(internalName)
         } catch (t: Throwable) {
             // LinkageErrors here usually mean the extension uses an Android API the desktop app doesn't stub

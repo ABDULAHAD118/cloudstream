@@ -16,10 +16,18 @@ App data (repos, installed extensions, converted jars) lives in `~/Library/Appli
 
 ## How extensions run
 
-`.cs3` files are Android DEX. When you install one, it's converted to a JVM jar with dex2jar and then loaded
-with a `URLClassLoader`. The app stubs the few Android classes that extensions touch while loading
-(`android.content.Context`, `android.util.Log`) and provides a desktop `Plugin` base class. If an extension
-calls any other Android API, it fails with an error shown under **Installed**.
+`.cs3` files are Android DEX. When you install one, it's converted to a JVM jar with dex2jar and loaded with its
+own class loader. Android itself isn't there, so the app fills the gap in two ways:
+
+- **Real implementations** of what extensions use for actual work: `Context.getSharedPreferences` (saved under
+  `shared_prefs/`), `android.util.Base64`, `android.net.Uri`, `android.util.Log`, `CommonActivity.showToast`
+  (shown in the window), and the `Plugin` base class.
+- **Generated stand-ins** for every other Android class an extension references (views, dialogs, fragments,
+  animations), built at load time with exactly the members it uses. Calls into them do nothing and return null/0,
+  so extensions with Android settings screens (such as CNC Verse) still load and scrape. Stand-ins for the Activity
+  classes are Contexts, because extensions cast the Context they're given to `AppCompatActivity`, as on Android.
+
+If an extension still fails, the error appears under **Installed**.
 
 ## What works
 
@@ -39,7 +47,7 @@ calls any other Android API, it fails with an error shown under **Installed**.
 - Downloads, library and bookmarks, watch history, and the continue-watching row (resume positions are saved, though).
 - Account sync (AniList, MAL, Simkl, Trakt), subtitle search providers, backup and restore.
 - Chromecast and FCast. Torrent titles.
-- Extension settings screens (they're Android views), plus extensions that need WebView or Cloudflare bypass
+- Extension settings screens (they're Android views and do nothing here; defaults apply), plus extensions that need WebView or Cloudflare bypass
   (`WebViewResolver` is a no-op on the JVM) or other un-stubbed Android APIs.
 - Short-code repository links (cutt.ly and py.md). Paste the full URL instead.
 - Translations, the app's settings, and the in-app updater. Updates come from GitHub releases.

@@ -31,7 +31,9 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream4.theme.CloudStreamTheme
 import com.lagradost.cloudstream4.theme.CloudStreamThemeMode
 import kotlinx.coroutines.Dispatchers
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -76,6 +78,19 @@ fun main() = application {
 @Composable
 fun App(start: List<Screen> = listOf(Home)) {
     val stack = remember { start.toMutableStateList() }
+    Toasts.current?.let { message ->
+        LaunchedEffect(message) { delay(3500); if (Toasts.current == message) Toasts.current = null }
+    }
+    Box(Modifier.fillMaxSize()) {
+        AppContent(stack)
+        Toasts.current?.let {
+            Snackbar(Modifier.align(Alignment.BottomCenter).padding(24.dp)) { Text(it) }
+        }
+    }
+}
+
+@Composable
+private fun AppContent(stack: SnapshotStateList<Screen>) {
     val current = stack.last()
     fun open(screen: Screen) = stack.add(screen)
     fun tab(screen: Screen) { stack.clear(); stack.add(screen) }
