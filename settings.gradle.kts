@@ -19,3 +19,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "CloudStream"
 include(":app", ":shared", ":library", ":docs", ":desktopApp")
+include(":macApp") // fork-only macOS app, kept on its own line so upstream syncs merge cleanly

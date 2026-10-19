@@ -1,0 +1,64 @@
+name: Mac Intel build
+
+# Fork-only. Every push to master that touches the Mac app (or the code it reuses)
+# builds the Intel (x86_64) DMG and publishes it as a GitHub release.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "macApp/**"
+      - "library/**"
+      - "shared/**"
+      - "gradle/**"
+      - "settings.gradle.kts"
+      - ".github/workflows/mac-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mac-intel-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # jpackage bundles the JRE of the machine it runs on, so an Intel DMG needs an Intel runner
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Test and package DMG
+        run: ./gradlew :macApp:jvmTest :macApp:packageDmg -PmacAppVersion=1.0.${GITHUB_RUN_NUMBER}
+
+      - name: Check Intel architecture
+        run: |
+          app="macApp/build/compose/binaries/main/app/CloudStream.app"
+          lipo "$app/Contents/runtime/Contents/Home/lib/libjli.dylib" -verify_arch x86_64
+
+      # Downloadable from the run page even if publishing the release fails.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudStream-mac-intel
+          path: macApp/build/compose/binaries/main/dmg/*.dmg
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="mac-build-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" macApp/build/compose/binaries/main/dmg/*.dmg \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Mac Intel build $GITHUB_RUN_NUMBER" \
+            --notes "Intel (x86_64) Mac build of ${GITHUB_SHA::7}. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway. Needs IINA or VLC for playback. See macApp/README.md for what works."

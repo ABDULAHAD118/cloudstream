@@ -1,0 +1,33 @@
+name: Sync upstream
+
+# Fork-only. Daily: merge recloudstream/cloudstream master into this fork. Only when that
+# brings new commits does it start a new Mac build (a push made with GITHUB_TOKEN
+# does not trigger the build on its own).
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge upstream
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          result="$(gh api -X POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=master)"
+          echo "$result"
+          echo "type=$(jq -r .merge_type <<<"$result")" >> "$GITHUB_OUTPUT"
+
+      - name: Build new Mac release
+        if: steps.merge.outputs.type != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run mac-release.yml --repo "$GITHUB_REPOSITORY" --ref master

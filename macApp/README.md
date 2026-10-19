@@ -1,0 +1,52 @@
+# CloudStream for Mac (fork-only)
+
+A small Compose Desktop app that runs CloudStream's Android extensions on macOS. It reuses upstream's
+`library` module (MainAPI, extractors, plugin API) and the `shared` theme. Everything Mac-specific lives
+in this module, so the daily upstream sync stays conflict-free. It's separate from upstream's `desktopApp`,
+which is still a placeholder.
+
+## Install
+
+1. Download the DMG from the latest **Mac Intel build** release and drag CloudStream to Applications.
+2. The first launch is blocked because the app isn't notarized. Go to System Settings → Privacy & Security → **Open Anyway**.
+3. Install [IINA](https://iina.io) (recommended) or [VLC](https://www.videolan.org). Videos play in whichever one is installed.
+4. Open **Extensions**, paste a repository URL (a `repo.json` link or a `cloudstreamrepo://` link), and install providers.
+   The official repo is `https://raw.githubusercontent.com/recloudstream/extensions/master/repo.json`.
+
+App data (repos, installed extensions, converted jars) lives in `~/Library/Application Support/CloudStream`.
+
+## How extensions run
+
+`.cs3` files are Android DEX. When you install one, it's converted to a JVM jar with dex2jar and then loaded
+with a `URLClassLoader`. The app stubs the few Android classes that extensions touch while loading
+(`android.content.Context`, `android.util.Log`) and provides a desktop `Plugin` base class. If an extension
+calls any other Android API, it fails with an error shown under **Installed**.
+
+## What works
+
+- Repositories: add, remove, browse, install, update, and remove extensions. SHA-256 hashes are checked the same way the Android app checks them.
+- Home page per provider, search across all providers, and title pages for movies, series (by season), anime (dub/sub), and live streams.
+- Link loading. Clicking a link opens it in IINA (all headers are sent) or VLC (only Referer and User-Agent are sent). Subtitles are downloaded and passed to the player.
+
+## What's missing (compared with Android)
+
+- Built-in player and its features: watch progress, resume, skip intro, and playback speed presets. The player is external.
+- Downloads, library and bookmarks, watch history, and continue watching.
+- Account sync (AniList, MAL, Simkl, Trakt), subtitle search providers, backup and restore.
+- Chromecast and FCast. Torrent titles.
+- Extension settings screens (they're Android views), plus extensions that need WebView or Cloudflare bypass
+  (`WebViewResolver` is a no-op on the JVM) or other un-stubbed Android APIs.
+- Short-code repository links (cutt.ly and py.md). Paste the full URL instead.
+- Translations, the app's settings, and the in-app updater. Updates come from GitHub releases.
+
+## Develop
+
+```bash
+./gradlew :macApp:run
+```
+
+`./gradlew :macApp:jvmTest` runs the offline tests. Prefix the command with `CS_SMOKE=1` to also run the
+network tests, which install the official repo and drive search → title → links through the real UI. Those
+tests save screenshots to `macApp/build/ui-shots`.
+
+The DMG (`:macApp:packageDmg`) needs a full JDK 17+ with `jpackage`. CI builds it on an Intel runner (`.github/workflows/mac-release.yml`).
