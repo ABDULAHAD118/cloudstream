@@ -1,7 +1,7 @@
-name: Mac Intel build
+name: Mac build
 
 # Fork-only. Every push to master that touches the Mac app (or the code it reuses)
-# builds the Intel (x86_64) DMG and publishes it as a GitHub release.
+# builds an Intel and an Apple Silicon DMG and publishes both in one GitHub release.
 on:
   push:
     branches: [master]
@@ -18,14 +18,22 @@ permissions:
   contents: write
 
 concurrency:
-  group: mac-intel-build
+  group: mac-build
   cancel-in-progress: true
 
 jobs:
   build:
-    # jpackage bundles the JRE of the machine it runs on, so an Intel DMG needs an Intel runner
-    runs-on: macos-15-intel
+    # jpackage bundles the JRE of the machine it runs on, so each architecture needs its own runner
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: macos-15-intel, label: intel }
+          - { arch: arm64, runner: macos-15, label: apple-silicon }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    env:
+      APP: macApp/build/compose/binaries/main/app/CloudStream.app
+      DMG: CloudStream-1.0.${{ github.run_number }}-${{ matrix.label }}.dmg
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,19 +46,38 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Test and package DMG
-        run: ./gradlew :macApp:jvmTest :macApp:packageDmg -PmacAppVersion=1.0.${GITHUB_RUN_NUMBER}
+      - name: Test and build app
+        run: ./gradlew :macApp:jvmTest :macApp:createDistributable -PmacAppVersion=1.0.${GITHUB_RUN_NUMBER}
 
-      - name: Check Intel architecture
+      - name: Check architecture
         run: |
-          app="macApp/build/compose/binaries/main/app/CloudStream.app"
-          lipo "$app/Contents/runtime/Contents/Home/lib/libjli.dylib" -verify_arch x86_64
+          lipo "$APP/Contents/MacOS/CloudStream" -verify_arch ${{ matrix.arch }}
+          lipo "$APP/Contents/runtime/Contents/Home/lib/libjli.dylib" -verify_arch ${{ matrix.arch }}
 
-      # Downloadable from the run page even if publishing the release fails.
+      # Apple Silicon refuses to launch unsigned code, so sign ad-hoc (no Apple Developer account needed)
+      - name: Sign ad-hoc and package DMG
+        run: |
+          set -euo pipefail
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          mkdir dmg-root
+          cp -R "$APP" dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname CloudStream -srcfolder dmg-root -ov -format UDZO "$DMG"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudStream-mac-intel
-          path: macApp/build/compose/binaries/main/dmg/*.dmg
+          name: dmg-${{ matrix.label }}
+          path: ${{ env.DMG }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dmg-*
+          merge-multiple: true
 
       - name: Publish release
         env:
@@ -58,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="mac-build-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" macApp/build/compose/binaries/main/dmg/*.dmg \
+          gh release create "$tag" *.dmg \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Mac Intel build $GITHUB_RUN_NUMBER" \
-            --notes "Intel (x86_64) Mac build of ${GITHUB_SHA::7}. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway. Needs IINA or VLC for playback. See macApp/README.md for what works."
+            --title "Mac build $GITHUB_RUN_NUMBER" \
+            --notes "Mac build of ${GITHUB_SHA::7}. Download **-intel.dmg** for Intel Macs or **-apple-silicon.dmg** for M-series Macs. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway. Needs IINA or VLC for playback. See macApp/README.md for what works."
