@@ -2,10 +2,10 @@ package com.lagradost.cloudstream.mac
 
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.graphics.asComposeImageBitmap
 import org.jetbrains.skia.ColorAlphaType
 import org.jetbrains.skia.ColorType
-import org.jetbrains.skia.Image
+import org.jetbrains.skia.Bitmap
 import org.jetbrains.skia.ImageInfo
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
 import uk.co.caprica.vlcj.factory.discovery.NativeDiscovery
@@ -28,12 +28,23 @@ class VideoEngine : AutoCloseable {
             System.getProperty("compose.application.resources.dir")?.let { File(it, "vlc/lib") }
                 ?.takeIf { it.isDirectory }?.let { System.setProperty("jna.library.path", it.path) }
             if (NativeDiscovery().discover()) null
-            else "The video engine (libVLC) wasn't found. Install VLC from videolan.org, or use “Open in external player”."
+            else "The video engine (libVLC) wasn't found. Install VLC from videolan.org."
         }
+
+        private val sharedEngine by lazy { runCatching { loadError?.let { error(it) }; VideoEngine() } }
+
+        /** The app's one engine. Slow to create, so main() warms it up in the background; blocks until ready. */
+        fun shared(): Result<VideoEngine> = sharedEngine
     }
 
     private val factory = MediaPlayerFactory("--no-video-title-show", "--quiet")
     val player = factory.mediaPlayers().newEmbeddedMediaPlayer()
+
+    // CS_VLC_LOG=1 prints libVLC's own warnings and errors, for diagnosing streams that won't play
+    private val nativeLog = if (System.getenv("CS_VLC_LOG") == "1") factory.application().newLog().apply {
+        level = uk.co.caprica.vlcj.log.LogLevel.WARNING
+        addLogListener { level, module, _, _, _, _, _, message -> println("libvlc $level [$module] $message") }
+    } else null
 
     var frame by mutableStateOf<ImageBitmap?>(null, neverEqualPolicy())
         private set
@@ -55,8 +66,15 @@ class VideoEngine : AutoCloseable {
         private set
 
     @Volatile private var pendingSeek = 0L
+    @Volatile private var knownLength: Long? = null
+
+    /** A length read from the stream itself (HLS playlist), which beats libVLC's estimate. */
+    fun useKnownLength(ms: Long) { knownLength = ms; length = ms }
+    @Volatile private var opened = ""
     private var info: ImageInfo? = null
     private var pixels = ByteArray(0)
+    // A 1080p frame is 8 MB of native memory; free each one a few frames later instead of waiting for a GC pause
+    private val recent = ArrayDeque<Bitmap>()
 
     init {
         val format = object : BufferFormatCallback {
@@ -79,34 +97,51 @@ class VideoEngine : AutoCloseable {
                 val imageInfo = info ?: return
                 val buffer = nativeBuffers[0].duplicate().apply { rewind() }
                 buffer.get(pixels, 0, minOf(pixels.size, buffer.remaining()))
-                frame = Image.makeRaster(imageInfo, pixels, imageInfo.width * 4).toComposeImageBitmap()
+                val bitmap = Bitmap().apply { installPixels(imageInfo, pixels, imageInfo.width * 4); setImmutable() }
+                frame = bitmap.asComposeImageBitmap()
+                recent.addLast(bitmap)
+                if (recent.size > 4) recent.removeFirst().close()
             }
         }
         player.videoSurface().set(factory.videoSurfaces().newVideoSurface(format, render, true))
         // These run on libVLC's thread: only update state here, never call back into the player
         player.events().addMediaPlayerEventListener(object : MediaPlayerEventAdapter() {
             // libVLC doesn't always send a final 100% buffering event, so a moving clock also ends buffering
-            override fun timeChanged(mediaPlayer: MediaPlayer, newTime: Long) { time = newTime; buffering = false }
-            override fun lengthChanged(mediaPlayer: MediaPlayer, newLength: Long) { length = newLength }
+            override fun timeChanged(mediaPlayer: MediaPlayer, newTime: Long) {
+                // Resume by seeking once the clock first moves: libVLC's :start-time stalls some HTTP streams, and
+                // seeking HLS on the "playing" event, before any frame, left it buffering forever
+                val seek = pendingSeek
+                if (seek > 0) { pendingSeek = 0; mediaPlayer.submit { mediaPlayer.controls().setTime(seek) }; return }
+                time = newTime; buffering = false
+            }
+            override fun lengthChanged(mediaPlayer: MediaPlayer, newLength: Long) { length = knownLength ?: newLength }
             override fun playing(mediaPlayer: MediaPlayer) {
-                playing = true; buffering = false
-                // Resume by seeking once playback runs; libVLC's :start-time option stalls some HTTP streams
-                val seek = pendingSeek.also { pendingSeek = 0 }
-                if (seek > 0) mediaPlayer.submit { mediaPlayer.controls().setTime(seek) }
+                playing = true; buffering = pendingSeek > 0
             }
             override fun paused(mediaPlayer: MediaPlayer) { playing = false }
             override fun stopped(mediaPlayer: MediaPlayer) { playing = false }
             override fun buffering(mediaPlayer: MediaPlayer, newCache: Float) { buffering = newCache < 100f }
             override fun finished(mediaPlayer: MediaPlayer) { playing = false; ended = true }
-            override fun error(mediaPlayer: MediaPlayer) { playing = false; failed = true }
+            override fun error(mediaPlayer: MediaPlayer) {
+                if (nativeLog != null) println("libvlc error event while opening ${opened.take(80)}")
+                playing = false; failed = true
+            }
         })
     }
 
     /** libVLC can only send Referer and User-Agent itself; [HeaderProxy] covers links that need more. */
-    fun open(url: String, referer: String?, userAgent: String?, startAtMs: Long) {
-        ended = false; failed = false; buffering = true; time = startAtMs; length = 0
+    /** [audioUrl] is a separate audio stream to play alongside, for sites (YouTube) that serve video-only streams. */
+    fun open(url: String, referer: String?, userAgent: String?, startAtMs: Long, audioUrl: String? = null, maxHeight: Int? = null) { // null maxHeight: adaptive
+        ended = false; failed = false; buffering = true; time = startAtMs; length = 0; knownLength = null; frame = null
         pendingSeek = startAtMs
-        val options = listOfNotNull(referer?.let { ":http-referrer=$it" }, userAgent?.let { ":http-user-agent=$it" })
+        opened = url
+        val options = listOfNotNull(
+            referer?.let { ":http-referrer=$it" }, userAgent?.let { ":http-user-agent=$it" }, audioUrl?.let { ":input-slave=$it" },
+            // HLS/DASH adapt to the connection on their own (Auto); a chosen quality fixes the best variant under it
+            maxHeight?.let { ":adaptive-maxheight=$it" }, maxHeight?.let { ":adaptive-logic=highest" },
+            // The app draws subtitles itself; stop libVLC drawing stream subtitles or sidecar files a second time
+            ":no-sub-autodetect-file", if (url.startsWith("http")) ":no-spu" else null,
+        )
         player.media().play(url, *options.toTypedArray())
         player.controls().setRate(rate)
         player.audio().setVolume(volume)
@@ -126,7 +161,14 @@ class VideoEngine : AutoCloseable {
     fun currentAudio(): Int = player.audio().track()
     fun selectAudio(id: Int) { player.audio().setTrack(id) }
 
+    /** Stops playback and clears the picture, keeping the engine for the next video. */
+    fun stop() {
+        player.controls().stop()
+        playing = false; buffering = false; frame = null
+    }
+
     override fun close() {
+        nativeLog?.release()
         player.controls().stop()
         player.release()
         factory.release()

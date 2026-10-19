@@ -39,6 +39,11 @@ data class InstalledPlugin(val internalName: String, val name: String, val versi
 data class SavedState(val repos: List<RepoEntry> = emptyList(), val plugins: List<InstalledPlugin> = emptyList())
 
 object Extensions {
+    init {
+        // Extensions built on NewPipeExtractor (YouTube) need this, as CommonActivity sets it up on Android
+        org.schabi.newpipe.extractor.NewPipe.init(NewPipeDownloader)
+    }
+
     // The property lets tests use a throwaway folder instead of the real app data
     val dataDir = File(System.getProperty("cloudstream.dataDir") ?: "${System.getProperty("user.home")}/Library/Application Support/CloudStream")
         .apply { mkdirs() }
@@ -126,7 +131,10 @@ object Extensions {
     }
 
     private fun cs3(internalName: String) = File(pluginDir, "$internalName.cs3")
-    private fun jar(internalName: String) = File(pluginDir, "$internalName.jar")
+    // Bump the suffix whenever conversion changes, so jars converted the old way are redone on next load
+    private fun jar(internalName: String) = File(pluginDir, "$internalName.d2j2.jar")
+    private fun staleJars(internalName: String) =
+        pluginDir.listFiles { f -> f.name.startsWith("$internalName.") && f.extension == "jar" }.orEmpty()
 
     suspend fun install(plugin: SitePlugin, repoUrl: String) {
         val bytes = app.get(plugin.url).okhttpResponse.body.bytes()
@@ -153,7 +161,7 @@ object Extensions {
         }
         loadErrors.remove(internalName)
         cs3(internalName).delete()
-        jar(internalName).delete()
+        staleJars(internalName).forEach { it.delete() }
         if (!keepState) save(state.copy(plugins = state.plugins.filter { it.internalName != internalName }))
     }
 
@@ -164,7 +172,9 @@ object Extensions {
         try {
             val jar = jar(internalName)
             if (!jar.exists()) {
-                Dex2jar.from(cs3).topoLogicalSort().skipDebug(false).to(jar.toPath())
+                staleJars(internalName).forEach { it.delete() }
+                // Keep names as-is: the default turns '-' into '_', breaking Kotlin's constructor-impl/box-impl calls
+                Dex2jar.from(cs3).topoLogicalSort().skipDebug(false).dontSanitizeNames(true).to(jar.toPath())
             }
             val manifestJson = ZipFile(cs3).use { zip ->
                 val entry = zip.getEntry("manifest.json") ?: error("No manifest.json in $internalName")

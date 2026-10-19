@@ -16,10 +16,10 @@ App data (repos, installed extensions, converted jars) lives in `~/Library/Appli
 
 ## How extensions run
 
-`.cs3` files are Android DEX. When you install one, it's converted to a JVM jar with dex2jar and loaded with its
-own class loader. Android itself isn't there, so the app fills the gap in two ways:
+`.cs3` files are Android DEX. When you install one, it's converted to a JVM jar with dex2jar (with names kept
+exactly as they are, since Kotlin uses names like `constructor-impl`) and loaded with its own class loader. Android itself isn't there, so the app fills the gap in two ways:
 
-- **Real implementations** of what extensions use for actual work: `Context.getSharedPreferences` (saved under
+- **Real implementations** of what extensions use for actual work: NewPipeExtractor's downloader (YouTube), `Context.getSharedPreferences` (saved under
   `shared_prefs/`), `android.util.Base64`, `android.net.Uri`, `android.util.Log`, `CommonActivity.showToast`
   (shown in the window), and the `Plugin` base class.
 - **Generated stand-ins** for every other Android class an extension references (views, dialogs, fragments,
@@ -34,17 +34,49 @@ If an extension still fails, the error appears under **Installed**.
 - Repositories: the official repo is added on first launch, the community directory can be browsed, and you can add, remove, install, update, and remove extensions.
   The extension list filters by type (Movie, Anime, TV Series, …), language, and search, like on Android. SHA-256 hashes are checked the same way the Android app checks them.
 - Home page per provider, search across all providers, and title pages for movies, series (by season), anime (dub/sub), and live streams.
-- Built-in player (libVLC, bundled in the DMG). It has play/pause, a seek bar, ±10 s, Skip OP (+85 s, like Android),
+  A search box at the top of Home searches every provider. The chosen Home provider and your search results stay
+  put when you open a title and come back, and the provider is remembered across launches.
+- **Load more** at the end of each Home and Search row fetches the extension's next page, as scrolling does on Android.
+  **⟳ Reload** on Home, Search, title pages, Extensions and the player fetches everything again.
+- Netflix-style look: a top bar with tabs and search, a hero banner on Home, poster rows that zoom on hover,
+  title pages with a backdrop, and Material icons throughout.
+- Built-in player (libVLC, bundled in the DMG). Its main bar has play/pause, ±10 s, a Netflix-style seek bar
+  (hover for a time preview) and a pop-up volume bar. Everything else is in **⋮** and on **right-click**: speed,
+  quality, source, audio, skip intro, reload, download, open in IINA/VLC. It has play/pause, a seek bar, ±10 s, Skip OP (+85 s, like Android),
   0.25–3× speed, volume up to 200 %, fullscreen, and source, subtitle and audio-track menus. It also plays the next episode
-  automatically or with **Next**, resumes where you stopped, and switches to the next source when one fails.
+  automatically or with **Next**, resumes where you stopped, and switches to the next source when one fails
+  or hasn't started within 45 s. **Quality** caps playback at 4K (the default, meaning best available), 1440p, 1080p,
+  720p, 480p, 360p, 240p or 144p and is remembered; it applies to the source order and to adaptive HLS/DASH streams.
+  HLS lengths come from the playlist, since libVLC miscounts some streams. The engine starts in the background
+  at launch, so opening the player doesn't freeze the window.
+- Subtitles are drawn by the app (SRT, WebVTT, ASS, plus HLS subtitle tracks), with text size and sync delay,
+  and the chosen language carries over to the next episode.
+- Every stream goes through a local OkHttp proxy, so libVLC never does network or TLS itself (inside the JVM its
+  TLS handshakes failed intermittently with "Interrupted system call"). The proxy sends all extension headers,
+  prefetches HLS segments in parallel (some hosts cap each connection far below the bitrate), and fetches large
+  files in 8 MB byte ranges (YouTube throttles a single open-ended request).
+- Sources that can seek come first: libVLC 3 can't seek WebM video paired with a separate audio track (YouTube's
+  VP9, its only 1440p/4K), so those are listed under Source as "no seeking".
+- Separate audio tracks from extensions (YouTube serves video-only streams) play alongside the video. The best one
+  is picked automatically, and **Audio** switches between them.
   Streams that need extra headers (cookies, Origin, tokens) go through a local proxy that adds them, as ExoPlayer does on Android.
 - Keyboard: Space/K play-pause, ←/→ or J/L ±10 s, ↑/↓ volume, M mute, F fullscreen, N next episode, [ ] speed, Esc exit.
 - "Open in IINA/VLC" hands the current stream to an external player if you prefer one.
+- **Downloads:** ⬇ on movies, episodes and in the player lists every source and quality (each variant of an HLS
+  playlist too). Files go to `~/Movies/CloudStream`, with subtitles saved next to them. Data is fetched with OkHttp
+  in parallel (byte ranges, or HLS segments via the library's `M3u8Helper2` as on Android), so it's not limited
+  to playback speed. A separate audio track (YouTube) is merged into one MKV locally, and DASH goes through libVLC.
+  HLS titles whose audio is a separate group (one track per language) download every language into one MKV.
+  Dropped connections are retried. The **Downloads** tab shows progress, with Cancel, Retry, Delete, Show in Finder, and ▶ Play offline in the
+  built-in player.
 
 ## What's missing (compared with Android)
 
 - Player extras: AniSkip intro/outro timestamps, subtitle styling and sync offset, Picture-in-Picture, DASH streams that need headers.
-- Downloads, library and bookmarks, watch history, and the continue-watching row (resume positions are saved, though).
+- Pausing and resuming a download (Retry restarts it), and download notifications.
+- Library and bookmarks, watch history, and the continue-watching row (resume positions are saved, though).
+- HLS playlists with tags between `#EXTINF` and the segment URI aren't fully read by the library's parser;
+  downloads then fall back to libVLC, which may stop early on them too. Standard playlists are fine.
 - Account sync (AniList, MAL, Simkl, Trakt), subtitle search providers, backup and restore.
 - Chromecast and FCast. Torrent titles.
 - Extension settings screens (they're Android views and do nothing here; defaults apply), plus extensions that need WebView or Cloudflare bypass
@@ -58,9 +90,18 @@ If an extension still fails, the error appears under **Installed**.
 ./gradlew :macApp:run
 ```
 
-`./gradlew :macApp:jvmTest` runs the offline tests. Prefix the command with `CS_SMOKE=1` to also run the
-network tests, which install the official repo and drive search → title → links through the real UI. Those
-tests save screenshots to `macApp/build/ui-shots`.
+To build the app and DMG locally, exactly as CI does, run this with a full JDK 17+ that includes `jpackage`
+(for example Temurin). It downloads VLC 3.0.24 for this Mac's architecture, checks its hash, and bundles libVLC:
 
-The DMG (`:macApp:packageDmg`) needs a full JDK 17+ with `jpackage`. CI builds an Intel and an Apple Silicon app on separate runners, signs them ad-hoc, and makes the DMGs
-(`.github/workflows/mac-release.yml`).
+```bash
+JAVA_HOME=/path/to/jdk macApp/build-dmg.sh 1.0.0
+```
+
+The DMG lands in `macApp/build/`.
+
+`./gradlew :macApp:jvmTest` runs the offline tests. Prefix the command with `CS_SMOKE=1` to also run the
+network tests. They use the official repo and drive every screen through the real UI, starting from a clean
+profile: repositories, installing and removing extensions, home, search, a movie, and a series in the player
+(play/pause, seek, speed, next episode). They save screenshots to `macApp/build/ui-shots`. Set `CS_VLC_LOG=1`
+to print libVLC's warnings and errors and the player's source switching, and `CS_PROXY_LOG=1` to print each
+request libVLC makes through the proxy.

@@ -23,6 +23,10 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.coroutines.swing)
             implementation(libs.nicehttp)
+            implementation(libs.newpipeextractor) // the library's YouTube support needs a downloader from the app
+            implementation(libs.ktor.http) // HlsPlaylistParser's variant URLs, for the download quality picker
+            // Material icons (1.7.3 is the last published; the icons are plain vectors, so they work with newer Compose)
+            implementation("org.jetbrains.compose.material:material-icons-extended:1.7.3")
             implementation(compose.desktop.currentOs) {
                 // compose.desktop.currentOs imports the wrong material 2, so we exclude it
                 exclude(group = "org.jetbrains.compose.material", module = "material")
