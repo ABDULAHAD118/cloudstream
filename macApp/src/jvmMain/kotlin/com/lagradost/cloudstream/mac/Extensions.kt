@@ -3,12 +3,17 @@ package com.lagradost.cloudstream.mac
 import android.content.Context
 import com.googlecode.d2j.dex.Dex2jar
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.plugins.BasePlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.extractorApis
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.net.URLClassLoader
 import java.security.MessageDigest
@@ -31,6 +36,7 @@ data class SitePlugin(
 )
 
 data class RepoEntry(val name: String, val url: String)
+data class DirectoryRepo(val name: String, val url: String, val verified: Boolean)
 data class InstalledPlugin(val internalName: String, val name: String, val version: Int, val repoUrl: String)
 data class SavedState(val repos: List<RepoEntry> = emptyList(), val plugins: List<InstalledPlugin> = emptyList())
 
@@ -41,7 +47,13 @@ object Extensions {
     private val pluginDir = File(dataDir, "plugins").apply { mkdirs() }
     private val stateFile = File(dataDir, "state.json")
 
-    var state: SavedState = runCatching { parseJson(stateFile.readText(), SavedState::class) }.getOrDefault(SavedState())
+    const val OFFICIAL_REPO = "https://raw.githubusercontent.com/recloudstream/extensions/master/repo.json"
+    // The community repository list that the Android setup screen links to
+    private const val REPO_DIRECTORY = "https://raw.githubusercontent.com/recloudstream/cs-repos/master/repos-db.json"
+
+    // First launch starts with the official repo so the Extensions tab isn't empty
+    var state: SavedState = runCatching { parseJson(stateFile.readText(), SavedState::class) }
+        .getOrDefault(SavedState(repos = listOf(RepoEntry("Cloudstream providers repository", OFFICIAL_REPO))))
         private set
 
     /** internalName -> load error, for plugins that installed but failed to start. */
@@ -60,12 +72,50 @@ object Extensions {
         return if (url.startsWith("http://") || url.startsWith("https://")) url else "https://$url"
     }
 
+    private val githubProject = Regex("^https://github\\.com/([^/]+)/([^/]+?)(?:\\.git)?/?$")
+    private data class GithubFile(val name: String)
+
+    /** A github.com project link (as people share them) is resolved to the repo manifest inside it. */
+    private suspend fun resolveRepoJson(url: String): String {
+        val (owner, name) = githubProject.find(url)?.destructured ?: return url
+        // Repos keep the manifest under varying names (repo.json, CNC.json, ...), usually on the builds branch
+        for (branch in listOf("builds", "master", "main")) {
+            val files = runCatching {
+                parseJson(app.get("https://api.github.com/repos/$owner/$name/contents?ref=$branch").text, Array<GithubFile>::class)
+            }.getOrNull() ?: continue
+            for (file in files.filter { it.name.endsWith(".json") }) {
+                val raw = "https://raw.githubusercontent.com/$owner/$name/$branch/${file.name}"
+                val isRepo = runCatching { parseJson(app.get(raw).text, Repository::class).pluginLists.isNotEmpty() }.getOrDefault(false)
+                if (isRepo) return raw
+            }
+        }
+        error("No CloudStream repository file found in $owner/$name")
+    }
+
     suspend fun addRepo(input: String): RepoEntry {
-        val url = normalizeRepoUrl(input)
+        val url = resolveRepoJson(normalizeRepoUrl(input))
         val repo = parseJson(app.get(url).text, Repository::class)
         val entry = RepoEntry(repo.name, url)
         save(state.copy(repos = state.repos.filter { it.url != url } + entry))
         return entry
+    }
+
+    /** Community repos with their names; repos that no longer respond are left out. */
+    suspend fun communityRepos(): List<DirectoryRepo> = coroutineScope {
+        // Entries are either a bare URL or {"url": ..., "verified": true}
+        parseJson(app.get(REPO_DIRECTORY).text, Array<Any>::class).mapNotNull { entry ->
+            when (entry) {
+                is String -> entry to false
+                is Map<*, *> -> (entry["url"] as? String ?: return@mapNotNull null) to (entry["verified"] == true)
+                else -> null
+            }
+        }.map { (url, verified) ->
+            async {
+                withTimeoutOrNull(15_000) {
+                    runCatching { DirectoryRepo(parseJson(app.get(url).text, Repository::class).name, url, verified) }.getOrNull()
+                }
+            }
+        }.awaitAll().filterNotNull().sortedWith(compareByDescending<DirectoryRepo> { it.verified }.thenBy { it.name.lowercase() })
     }
 
     fun removeRepo(url: String) = save(state.copy(repos = state.repos.filter { it.url != url }))
@@ -136,3 +186,16 @@ object Extensions {
         }
     }
 }
+
+/** Same rules as the Android PluginsViewModel: any selected type matches, "Others" also matches untyped plugins. */
+fun filterPlugins(plugins: List<SitePlugin>, types: Set<TvType>, language: String?, query: String): List<SitePlugin> =
+    plugins
+        // shortcut: NSFW extensions are always hidden, as on Android with its adult toggle off; add a setting if wanted
+        .filter { it.tvTypes?.contains(TvType.NSFW.name) != true }
+        .filter { p ->
+            types.isEmpty() || p.tvTypes?.any { t -> types.any { it.name == t } } == true ||
+                    (TvType.Others in types && p.tvTypes.isNullOrEmpty())
+        }
+        .filter { language == null || (it.language?.lowercase() ?: "none") == language }
+        .filter { query.isBlank() || it.name.contains(query, true) || it.description?.contains(query, true) == true }
+        .sortedBy { it.name.lowercase() }

@@ -333,6 +333,9 @@ fun ExtensionsScreen() {
     var repoInput by remember { mutableStateOf("") }
     var selectedRepo by remember { mutableStateOf(repos.firstOrNull()) }
     var plugins by remember { mutableStateOf<List<SitePlugin>?>(null) }
+    var types by remember { mutableStateOf(emptySet<TvType>()) }
+    var language by remember { mutableStateOf<String?>(null) }
+    var query by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     val ext = Extensions
@@ -348,6 +351,11 @@ fun ExtensionsScreen() {
         }
     }
 
+    var directory by remember { mutableStateOf<List<DirectoryRepo>?>(null) }
+    LaunchedEffect(Unit) {
+        directory = withContext(Dispatchers.IO) { runCatching { ext.communityRepos() }.getOrDefault(emptyList()) }
+    }
+
     LaunchedEffect(selectedRepo) {
         plugins = null
         val repo = selectedRepo ?: return@LaunchedEffect
@@ -357,7 +365,7 @@ fun ExtensionsScreen() {
     }
 
     Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(repoInput, { repoInput = it }, label = { Text("Repository URL (repo.json or cloudstreamrepo://…)") },
+        OutlinedTextField(repoInput, { repoInput = it }, label = { Text("Repository URL (repo.json, GitHub project or cloudstreamrepo:// link)") },
             singleLine = true, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(8.dp))
         Button(enabled = repoInput.isNotBlank() && busy == null, onClick = {
@@ -369,7 +377,7 @@ fun ExtensionsScreen() {
 
     Row(Modifier.fillMaxSize().padding(top = 8.dp)) {
         LazyColumn(Modifier.width(280.dp)) {
-            item { Text("Repositories", style = MaterialTheme.typography.titleMedium) }
+            item { Text("Your repositories", style = MaterialTheme.typography.titleMedium) }
             items(repos) { repo ->
                 ListItem(
                     headlineContent = { Text(repo.name) },
@@ -377,6 +385,19 @@ fun ExtensionsScreen() {
                     trailingContent = { TextButton(onClick = { ext.removeRepo(repo.url); refresh() }) { Text("Remove") } },
                     tonalElevation = if (repo == selectedRepo) 4.dp else 0.dp,
                     modifier = Modifier.clickable { selectedRepo = repo },
+                )
+            }
+            item {
+                Text("Community repositories", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+                if (directory == null) Text("Loading…", style = MaterialTheme.typography.bodySmall)
+            }
+            items(directory.orEmpty().filter { d -> repos.none { it.url == d.url } }) { d ->
+                ListItem(
+                    headlineContent = { Text(d.name + if (d.verified) " ✓" else "") },
+                    supportingContent = { Text(d.url, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    trailingContent = {
+                        TextButton(enabled = busy == null, onClick = { task("Adding ${d.name}") { selectedRepo = ext.addRepo(d.url) } }) { Text("Add") }
+                    },
                 )
             }
             item { Text("Installed (${installed.size})", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp)) }
@@ -393,27 +414,67 @@ fun ExtensionsScreen() {
             }
         }
         Spacer(Modifier.width(16.dp))
-        LazyColumn(Modifier.weight(1f)) {
-            val list = plugins
-            if (selectedRepo != null && list == null) item { CircularProgressIndicator() }
-            items(list.orEmpty().sortedBy { it.name.lowercase() }) { p ->
-                val have = installed.firstOrNull { it.internalName == p.internalName }
-                ListItem(
-                    headlineContent = { Text(p.name + if (p.status == 0) " (down)" else "") },
-                    supportingContent = {
-                        Text(listOfNotNull(p.language, p.tvTypes?.joinToString(), p.description).joinToString(" · "),
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    },
-                    trailingContent = {
-                        val label = when {
-                            have == null -> "Install"
-                            have.version < p.version -> "Update"
-                            else -> "Reinstall"
-                        }
-                        Button(enabled = busy == null, onClick = { task("Installing ${p.name}") { ext.install(p, selectedRepo!!.url) } }) { Text(label) }
-                    },
-                )
+        Column(Modifier.weight(1f)) {
+            PluginFilters(plugins.orEmpty(), types, { types = it }, language, { language = it }, query, { query = it })
+            LazyColumn {
+                val list = plugins
+                if (selectedRepo != null && list == null) item { CircularProgressIndicator() }
+                items(filterPlugins(list.orEmpty(), types, language, query)) { p ->
+                    val have = installed.firstOrNull { it.internalName == p.internalName }
+                    ListItem(
+                        headlineContent = { Text(p.name + if (p.status == 0) " (down)" else "") },
+                        supportingContent = {
+                            Text(listOfNotNull(p.language, p.tvTypes?.joinToString(), p.description).joinToString(" · "),
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        },
+                        trailingContent = {
+                            val label = when {
+                                have == null -> "Install"
+                                have.version < p.version -> "Update"
+                                else -> "Reinstall"
+                            }
+                            Button(enabled = busy == null, onClick = { task("Installing ${p.name}") { ext.install(p, selectedRepo!!.url) } }) { Text(label) }
+                        },
+                    )
+                }
             }
+        }
+    }
+}
+
+/** "TvSeries" -> "TV Series", like the Android chip labels. */
+fun TvType.label() = name.replace(Regex("([a-z])([A-Z])"), "$1 $2").replace("Tv ", "TV ")
+
+@Composable
+fun PluginFilters(
+    plugins: List<SitePlugin>,
+    types: Set<TvType>, onTypes: (Set<TvType>) -> Unit,
+    language: String?, onLanguage: (String?) -> Unit,
+    query: String, onQuery: (String) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(query, onQuery, label = { Text("Search extensions") }, singleLine = true, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        var open by remember { mutableStateOf(false) }
+        val languages = plugins.map { it.language?.lowercase() ?: "none" }.distinct().sorted()
+        Box {
+            OutlinedButton(onClick = { open = true }) { Text(language?.let { if (it == "none") "No language" else it } ?: "All languages") }
+            DropdownMenu(open, { open = false }) {
+                DropdownMenuItem(text = { Text("All languages") }, onClick = { open = false; onLanguage(null) })
+                languages.forEach { lang ->
+                    DropdownMenuItem(text = { Text(if (lang == "none") "No language" else lang) }, onClick = { open = false; onLanguage(lang) })
+                }
+            }
+        }
+    }
+    // Wrapping instead of a sideways-scrolling row, which is awkward with a mouse
+    FlowRow(Modifier.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        TvType.entries.filter { it != TvType.NSFW }.forEach { type ->
+            FilterChip(
+                selected = type in types,
+                onClick = { onTypes(if (type in types) types - type else types + type) },
+                label = { Text(type.label()) },
+            )
         }
     }
 }

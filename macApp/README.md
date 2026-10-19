@@ -10,8 +10,8 @@ which is still a placeholder.
 1. From the latest **Mac build** release, download `-intel.dmg` for an Intel Mac or `-apple-silicon.dmg` for an M-series Mac, then drag CloudStream to Applications.
 2. The first launch is blocked because the app isn't notarized. Go to System Settings → Privacy & Security → **Open Anyway**.
 3. Install [IINA](https://iina.io) (recommended) or [VLC](https://www.videolan.org). Videos play in whichever one is installed.
-4. Open **Extensions**, paste a repository URL (a `repo.json` link or a `cloudstreamrepo://` link), and install providers.
-   The official repo is `https://raw.githubusercontent.com/recloudstream/extensions/master/repo.json`.
+4. Open **Extensions**. The official repo is already added. Add more from **Community repositories** (the directory
+   the Android setup screen links to), or paste a link: a `repo.json` URL, a GitHub project URL, or a `cloudstreamrepo://` link.
 
 App data (repos, installed extensions, converted jars) lives in `~/Library/Application Support/CloudStream`.
 
@@ -24,7 +24,8 @@ calls any other Android API, it fails with an error shown under **Installed**.
 
 ## What works
 
-- Repositories: add, remove, browse, install, update, and remove extensions. SHA-256 hashes are checked the same way the Android app checks them.
+- Repositories: the official repo is added on first launch, the community directory can be browsed, and you can add, remove, install, update, and remove extensions.
+  The extension list filters by type (Movie, Anime, TV Series, …), language, and search, like on Android. SHA-256 hashes are checked the same way the Android app checks them.
 - Home page per provider, search across all providers, and title pages for movies, series (by season), anime (dub/sub), and live streams.
 - Link loading. Clicking a link opens it in IINA (all headers are sent) or VLC (only Referer and User-Agent are sent). Subtitles are downloaded and passed to the player.
 

@@ -32,7 +32,7 @@ class UiFlowSmokeTest {
 
         runComposeUiTest(testTimeout = 3.minutes) {
             setContent { CloudStreamTheme(mode = CloudStreamThemeMode.Dark) { androidx.compose.material3.Surface { App() } } }
-            waitForText("Internet Archive"); shot("1-home")
+            waitForText("Home"); waitForIdle(); shot("1-home")
 
             onNodeWithText("Search").performClick()
             onNodeWithText("Search all providers").performTextInput("night of the living dead")
@@ -44,6 +44,12 @@ class UiFlowSmokeTest {
 
             onNodeWithText("▶ Play").performClick()
             waitForText("· VIDEO"); shot("4-links")
+
+            onNodeWithText("Extensions").performClick()
+            waitForText("Reinstall") // the test profile already has every official extension
+            waitUntil(timeoutMillis = 60_000) { onAllNodesWithText("Loading…").fetchSemanticsNodes().isEmpty() }
+            shot("5-extensions")
+            onNodeWithText("Live").performClick(); waitForIdle(); shot("6-extensions-live")
         }
     }
 }
