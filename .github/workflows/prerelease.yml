@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Generate access token
+      if: github.repository == 'recloudstream/cloudstream'
       id: generate_token
       uses: tibdex/github-app-token@v2
       with:
@@ -39,6 +40,7 @@ jobs:
       run: chmod +x gradlew
 
     - name: Fetch keystore
+      if: github.repository == 'recloudstream/cloudstream'
       id: fetch_keystore
       run: |
         TMP_KEYSTORE_FILE_PATH="${RUNNER_TEMP}"/keystore
@@ -49,6 +51,29 @@ jobs:
         echo "::add-mask::${KEY_PWD}"
         echo "key_pwd=$KEY_PWD" >> $GITHUB_OUTPUT
 
+    # Forks: sign with FORK_KEYSTORE_BASE64/FORK_KEYSTORE_PASSWORD secrets if set, else a one-off key.
+    # A one-off key installs fine but can't update the previous build, so set the secrets to keep updates working.
+    - name: Fork keystore
+      if: github.repository != 'recloudstream/cloudstream'
+      id: fork_keystore
+      env:
+        FORK_KEYSTORE_BASE64: ${{ secrets.FORK_KEYSTORE_BASE64 }}
+        FORK_KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+      run: |
+        set -euo pipefail
+        dir="${RUNNER_TEMP}/keystore"
+        mkdir -p "$dir"
+        if [ -n "$FORK_KEYSTORE_BASE64" ]; then
+          echo "$FORK_KEYSTORE_BASE64" | base64 -d > "$dir/fork.keystore"
+          pwd="$FORK_KEYSTORE_PASSWORD"
+        else
+          pwd="$(openssl rand -hex 16)"
+          keytool -genkeypair -keystore "$dir/fork.keystore" -storepass "$pwd" -keypass "$pwd" -alias key0 \
+            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=CloudStream fork"
+        fi
+        echo "::add-mask::$pwd"
+        echo "key_pwd=$pwd" >> "$GITHUB_OUTPUT"
+
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v5
       with:
@@ -58,8 +83,8 @@ jobs:
       run: ./gradlew assemblePrereleaseRelease androidSourcesJar makeJar
       env:
         SIGNING_KEY_ALIAS: "key0"
-        SIGNING_KEY_PASSWORD: ${{ steps.fetch_keystore.outputs.key_pwd }}
-        SIGNING_STORE_PASSWORD: ${{ steps.fetch_keystore.outputs.key_pwd }}
+        SIGNING_KEY_PASSWORD: ${{ steps.fetch_keystore.outputs.key_pwd || steps.fork_keystore.outputs.key_pwd }}
+        SIGNING_STORE_PASSWORD: ${{ steps.fetch_keystore.outputs.key_pwd || steps.fork_keystore.outputs.key_pwd }}
         SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
         SIMKL_CLIENT_SECRET: ${{ secrets.SIMKL_CLIENT_SECRET }}
         TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}

@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Generate access token
+        if: github.repository == 'recloudstream/cloudstream'
         id: generate_token
         uses: tibdex/github-app-token@v2
         with:
@@ -31,6 +32,7 @@ jobs:
           path: "src"
 
       - name: Checkout dokka
+        if: github.repository == 'recloudstream/cloudstream'
         uses: actions/checkout@v6
         with:
           repository: "recloudstream/dokka"
@@ -38,6 +40,7 @@ jobs:
           token: ${{ steps.generate_token.outputs.token }}
 
       - name: Clean old builds
+        if: github.repository == 'recloudstream/cloudstream'
         run: |
           cd $GITHUB_WORKSPACE/dokka/
           rm -rf "./app"
@@ -61,9 +64,19 @@ jobs:
           ./gradlew docs:dokkaGeneratePublicationHtml
 
       - name: Copy Dokka
+        if: github.repository == 'recloudstream/cloudstream'
         run: cp -r $GITHUB_WORKSPACE/src/docs/build/dokka/html/* $GITHUB_WORKSPACE/dokka/
 
+      # Forks can't push to recloudstream/dokka, so they get the docs as a download instead
+      - name: Upload Dokka
+        if: github.repository != 'recloudstream/cloudstream'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dokka-html
+          path: src/docs/build/dokka/html
+
       - name: Push builds
+        if: github.repository == 'recloudstream/cloudstream'
         run: |
           cd $GITHUB_WORKSPACE/dokka
           touch .nojekyll

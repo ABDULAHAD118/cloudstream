@@ -18,6 +18,8 @@ concurrency:
 
 jobs:
   build:
+    # Archives APKs into recloudstream's private archive repo; forks have no access, so skip there
+    if: github.repository == 'recloudstream/cloudstream'
     runs-on: ubuntu-latest
     steps:
     - name: Generate access token
