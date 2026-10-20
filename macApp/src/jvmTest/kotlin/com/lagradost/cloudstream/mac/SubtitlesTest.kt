@@ -44,4 +44,10 @@ class SubtitlesTest {
         )
         assertEquals(listOf("One", "Two"), HlsSubtitles.load(tracks.single()) { pages.getValue(it) }.map { it.text })
     }
+
+    @Test
+    fun brTagsBreakTheLine() {
+        val cues = SubtitleParser.parse("WEBVTT\n\n00:00:26.859 --> 00:00:30.238\nWe called it that<br/>because the grid<BR>looked like a squid.\n")
+        assertEquals("We called it that\nbecause the grid\nlooked like a squid.", cues.single().text)
+    }
 }

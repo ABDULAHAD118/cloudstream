@@ -69,16 +69,16 @@ class UiFlowSmokeTest {
      */
     private fun ComposeUiTest.loadMoreInFirstRow(): Boolean {
         val row = onAllNodes(hasScrollToIndexAction() and hasAnyAncestor(hasScrollToIndexAction())).onFirst()
-        if (runCatching { row.performScrollToNode(hasText("Load more")) }.isFailure) return false
+        // Rows fetch their next page when scrolled near the end, as on Android
         val before = texts().toSet()
-        onAllNodesWithText("Load more").onFirst().performClick()
-        waitUntil(timeoutMillis = 60_000) { texts().any { it !in before && it != "Load more" } }
-        return true
+        var i = 0
+        while (runCatching { row.performScrollToIndex(i + 5) }.isSuccess) i += 5
+        return runCatching { waitUntil(timeoutMillis = 60_000) { texts().any { it !in before } } }.isSuccess
     }
 
     /** The title page's Play button (white, with an icon), as opposed to the player's play icon. */
     private fun ComposeUiTest.waitPlayButton() =
-        waitUntil(timeoutMillis = 60_000) { onAllNodes(hasText("Play") and hasClickAction()).fetchSemanticsNodes().isNotEmpty() }
+        waitUntil(timeoutMillis = 60_000) { onAllNodes((hasText("Play") or hasText("Resume")) and hasClickAction()).fetchSemanticsNodes().isNotEmpty() }
 
     /** Clicks the Install button in the plugin row that contains [name]. */
     private fun ComposeUiTest.install(name: String) {
@@ -99,6 +99,7 @@ class UiFlowSmokeTest {
         Extensions.state.repos.forEach { Extensions.removeRepo(it.url) }
         runBlocking { Extensions.addRepo(Extensions.OFFICIAL_REPO) }
         Preferences.named("cloudstream_mac").edit().clear().commit() // remembered Home provider, quality cap
+        Library.clearHistory(); Library.bookmarks.forEach { Library.setBookmark(it.apiName, it.url, null) }
         Providers.refresh(); Providers.loading = false
 
         runComposeUiTest(testTimeout = 12.minutes) {
@@ -108,17 +109,18 @@ class UiFlowSmokeTest {
                     androidx.compose.material3.Surface { key(start) { App(start) } }
                 }
             }
-            waitForText("No providers yet"); shot("01-first-launch")
+            waitForText("No extensions yet"); shot("01-first-launch")
 
             // Repositories: the official repo is there by default; remove it and add it back by URL
             onNodeWithText("Extensions").performClick()
-            waitForText("Cloudstream providers repository")
-            waitForText("InternetArchiveProvider"); shot("02-extensions-default-repo")
+            waitForText("Cloudstream providers repository"); waitForText("extensions ·"); shot("02-extensions-default-repo")
             onAllNodesWithText("Remove").onFirst().performClick()
             waitUntil { Extensions.state.repos.isEmpty() }
             onNodeWithText("Repository URL", substring = true).performTextInput("https://github.com/recloudstream/extensions")
             onAllNodesWithText("Add").onFirst().performClick() // next to the URL field; the community list has more
             waitUntil(timeoutMillis = 60_000) { Extensions.state.repos.any { it.url == Extensions.OFFICIAL_REPO } }
+            waitForText("Cloudstream providers repository"); waitForIdle()
+            onNodeWithText("Cloudstream providers repository", useUnmergedTree = true).performClick() // its page lists the extensions
             waitForText("InternetArchiveProvider"); shot("03-repo-added-by-github-link")
 
             // Install two extensions through the UI; Search filters the list
@@ -127,6 +129,7 @@ class UiFlowSmokeTest {
             waitUntil { onAllNodesWithText("DailymotionProvider").fetchSemanticsNodes().isEmpty() }
             install("YoutubeProvider")
             onNodeWithText("Search extensions").performTextClearance()
+            onNodeWithContentDescription("Back").performClick()
             waitForText("Installed (2)"); shot("04-installed")
             assertTrue(Extensions.loadErrors.isEmpty(), "load errors: ${Extensions.loadErrors}")
             assertTrue(Providers.list.any { it.name == "Internet Archive" } && Providers.list.any { it.name == "YouTube" })
@@ -154,16 +157,11 @@ class UiFlowSmokeTest {
             assertTrue(HomeState.rows.isNotEmpty())
             shot("05d-home-kept-provider")
 
-            // The search box on Home searches every provider and opens the results
-            onNodeWithTag("home-search").performTextInput("big buck bunny")
-            onNodeWithTag("home-search").performImeAction()
-            waitForText("Search all providers"); waitForText("Internet Archive"); shot("05e-home-search")
-
             // Search across providers
             onAllNodesWithText("Search").onFirst().performClick() // the sidebar item; the screen's button comes later
             onNodeWithText("Search all providers").performTextClearance()
             onNodeWithText("Search all providers").performTextInput("big buck bunny")
-            onAllNodesWithText("Search").onLast().performClick() // the button; the rail item comes first
+            onNodeWithTag("home-search").performImeAction()
             waitForText("Internet Archive"); waitForIdle(); Thread.sleep(3000); shot("06-search")
             assertTrue(loadMoreInFirstRow(), "search row offered no further page")
             shot("06b-search-load-more")
@@ -197,6 +195,11 @@ class UiFlowSmokeTest {
             onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.DirectionRight) } // +10 s
             try { waitUntil(timeoutMillis = 90_000) { (position() ?: 0) >= before + 12 } } catch (e: Throwable) { shot("fail-seek"); throw e }
             shot("10-player-seeked")
+            // Hovering the seek bar shows the frame there, from a second silent player
+            onNodeWithTag("seek-bar").performMouseInput { moveTo(Offset(width * 0.6f, height / 2f)) }
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithContentDescription("Preview frame", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
+            shot("10a-seek-preview")
+            onNodeWithTag("seek-bar").performMouseInput { moveTo(Offset(width * 0.6f, -400f)) }
             onNodeWithContentDescription("More options").performClick(); shot("10b-player-menu")
             onNodeWithText("Speed").performClick()
             onNodeWithText("2.0x").performClick()
@@ -264,7 +267,7 @@ class UiFlowSmokeTest {
             // Uninstall from the Installed list
             start = listOf(Screen.ExtensionsTab)
             waitForText("Installed (2)")
-            onNode(hasText("Remove") and hasAnyAncestor(hasTestTag("installed-YoutubeProvider"))).performClick()
+            onNode(hasContentDescription("Remove") and hasAnyAncestor(hasTestTag("installed-YoutubeProvider"))).performClick()
             waitForText("Installed (1)"); shot("16-uninstalled")
             assertTrue(Providers.list.none { it.name == "YouTube" })
         }

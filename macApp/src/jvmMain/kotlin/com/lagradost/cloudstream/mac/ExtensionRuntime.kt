@@ -124,6 +124,14 @@ class ExtensionClassLoader(private val jar: File, parent: ClassLoader) : URLClas
         fun stub(owner: String): Stub? =
             if (stubbable.any(owner::startsWith) && owner !in own && !exists(owner)) stubs.getOrPut(owner) { Stub() } else null
 
+        // Types that only pass through signatures (say a ComponentName handed from one Android call to another)
+        // still have to load, so they get empty stand-ins too
+        fun signature(desc: String) {
+            val types = if (desc.startsWith("(")) Type.getArgumentTypes(desc) + Type.getReturnType(desc) else arrayOf(Type.getType(desc))
+            types.map { if (it.sort == Type.ARRAY) it.elementType else it }.filter { it.sort == Type.OBJECT }
+                .forEach { t -> uses += { stub(t.internalName) } }
+        }
+
         // Members used through an extension class but declared by a missing superclass belong on that stub
         fun owning(owner: String, member: String, classes: Map<String, Own>): String? {
             var current: String? = owner
@@ -145,13 +153,15 @@ class ExtensionClassLoader(private val jar: File, parent: ClassLoader) : URLClas
                         ifs?.forEach { i -> uses += { stub(i)?.isInterface = true } }
                     }
 
-                    override fun visitField(a: Int, n: String, d: String, s: String?, v: Any?): FieldVisitor? { info.members += n; return null }
+                    override fun visitField(a: Int, n: String, d: String, s: String?, v: Any?): FieldVisitor? { info.members += n; signature(d); return null }
 
                     override fun visitMethod(a: Int, n: String, d: String, s: String?, ex: Array<out String>?): MethodVisitor {
                         info.members += n + d
+                        signature(d)
                         return object : MethodVisitor(Opcodes.ASM9) {
                             override fun visitMethodInsn(op: Int, owner: String, name: String, desc: String, itf: Boolean) {
                                 if (owner.startsWith("[")) return
+                                signature(desc)
                                 uses += { classes ->
                                     owning(owner, name + desc, classes)?.let(::stub)?.let {
                                         if (itf) it.isInterface = true
@@ -161,6 +171,7 @@ class ExtensionClassLoader(private val jar: File, parent: ClassLoader) : URLClas
                             }
 
                             override fun visitFieldInsn(op: Int, owner: String, name: String, desc: String) {
+                                signature(desc)
                                 uses += { classes ->
                                     owning(owner, name, classes)?.let(::stub)?.fields
                                         ?.add(Triple(name, desc, op == Opcodes.GETSTATIC || op == Opcodes.PUTSTATIC))

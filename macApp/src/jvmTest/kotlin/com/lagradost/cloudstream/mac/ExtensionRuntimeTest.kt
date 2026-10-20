@@ -35,6 +35,12 @@ class ExtensionRuntimeTest {
             visitInsn(ACONST_NULL); visitMethodInsn(INVOKESTATIC, "android/widget/Toast", "makeText", "(Ljava/lang/Object;)Landroid/widget/Toast;", false)
             visitInsn(ARETURN); visitMaxs(0, 0); visitEnd()
         }
+        cw.visitMethod(ACC_PRIVATE, "restart", "(Landroid/content/ComponentName;)V", null, null).apply {
+            // ComponentName only passes through signatures, as in CNC Verse's CineVood restartApp
+            visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKESTATIC, "android/content/Intent", "makeRestartActivityTask", "(Landroid/content/ComponentName;)Landroid/content/Intent;", false)
+            visitInsn(POP); visitInsn(RETURN); visitMaxs(0, 0); visitEnd()
+        }
         cw.visitEnd()
         return File.createTempFile("ext", ".jar").apply {
             deleteOnExit()
@@ -51,6 +57,8 @@ class ExtensionRuntimeTest {
         // Context's real getSharedPreferences, not an empty stub
         assertIs<SharedPreferences>(settings.javaClass.getMethod("prefs", Context::class.java).invoke(settings, host))
         assertNull(settings.javaClass.getMethod("ui").invoke(settings))
+        // Reflection (as when the plugin class is created) loads every signature type, ComponentName included
+        assertEquals(3, settings.javaClass.declaredMethods.size)
     }
 
     @Test

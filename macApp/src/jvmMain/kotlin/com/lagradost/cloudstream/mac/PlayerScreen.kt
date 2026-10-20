@@ -63,7 +63,11 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /** Something to play: an extension's episode [data], or a downloaded [file] (played offline with its [subtitleFiles]). */
-data class PlayItem(val title: String, val data: String, val file: String? = null, val subtitleFiles: List<String> = emptyList())
+data class PlayItem(
+    val title: String, val data: String, val file: String? = null, val subtitleFiles: List<String> = emptyList(),
+    /** Names for a downloaded file's audio tracks, in order, when the file itself doesn't carry them. */
+    val audioNames: List<String> = emptyList(),
+)
 
 val LocalWindowState = staticCompositionLocalOf<WindowState?> { null }
 
@@ -117,6 +121,18 @@ fun sortLinks(links: List<ExtractorLink>, maxQuality: Int = QualityPreference.ma
         .thenBy { if (it.quality > maxQuality) it.quality else -it.quality }
 )
 
+/**
+ * Holds off display sleep while a video plays, as QuickTime and IINA do; otherwise macOS sleeps the screen after its
+ * idle timeout, since watching doesn't touch the mouse or keyboard. caffeinate -w exits with the app if it crashes.
+ */
+@Composable
+fun KeepScreenAwake(active: Boolean) = DisposableEffect(active) {
+    val caffeinate = if (active) runCatching {
+        ProcessBuilder("/usr/bin/caffeinate", "-d", "-i", "-w", ProcessHandle.current().pid().toString()).start()
+    }.getOrNull() else null
+    onDispose { caffeinate?.destroy() }
+}
+
 private val speeds = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 3f)
 
 fun formatTime(ms: Long): String {
@@ -126,29 +142,35 @@ fun formatTime(ms: Long): String {
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-fun PlayerScreen(api: MainAPI?, items: List<PlayItem>, startIndex: Int, onBack: () -> Unit) {
+fun PlayerScreen(
+    api: MainAPI?, items: List<PlayItem>, startIndex: Int,
+    onProgress: (PlayItem, Long, Long) -> Unit = { _, _, _ -> }, onBack: () -> Unit,
+) {
     // Starting libVLC loads ~340 plugins; that happens off the UI thread (and normally already at launch)
     val engine by produceState<Result<VideoEngine>?>(null) { value = withContext(Dispatchers.IO) { VideoEngine.shared() } }
     val ready = engine
     when {
         ready == null -> Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             // The first start after installing can take minutes (macOS checks each libVLC plugin), so allow leaving
-            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.TopStart).padding(12.dp)) {
+            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.TopStart).padding(12.dp).handCursor()) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White)
             }
             Column(horizontalAlignment = Alignment.CenterHorizontally) { CircularProgressIndicator(); Text("Starting player…", color = Color.White) }
         }
         ready.isFailure -> Column(Modifier.padding(24.dp)) {
-            TextButton(onClick = onBack) { Text("← Back") }
+            TextButton(onClick = onBack, modifier = Modifier.handCursor()) { Text("← Back") }
             Text(ready.exceptionOrNull()?.message.orEmpty(), color = MaterialTheme.colorScheme.error)
         }
-        else -> PlayerContent(ready.getOrThrow(), api, items, startIndex, onBack)
+        else -> PlayerContent(ready.getOrThrow(), api, items, startIndex, onProgress, onBack)
     }
 }
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun PlayerContent(engine: VideoEngine, api: MainAPI?, items: List<PlayItem>, startIndex: Int, onBack: () -> Unit) {
+private fun PlayerContent(
+    engine: VideoEngine, api: MainAPI?, items: List<PlayItem>, startIndex: Int,
+    onProgress: (PlayItem, Long, Long) -> Unit, onBack: () -> Unit,
+) {
     val window = LocalWindowState.current
     val scope = rememberCoroutineScope()
 
@@ -192,7 +214,10 @@ private fun PlayerContent(engine: VideoEngine, api: MainAPI?, items: List<PlayIt
         }
     }
 
-    fun saveProgress() = WatchProgress.set(progressKey, engine.time, engine.length)
+    fun saveProgress() {
+        WatchProgress.set(progressKey, engine.time, engine.length)
+        onProgress(item, engine.time, engine.length)
+    }
 
     fun goTo(newIndex: Int) {
         if (newIndex !in items.indices) return
@@ -268,14 +293,33 @@ private fun PlayerContent(engine: VideoEngine, api: MainAPI?, items: List<PlayIt
             }
         }
     }
-    LaunchedEffect(engine.ended) { if (engine.ended && index < items.lastIndex) goTo(index + 1) }
-    val menuOpen = openMenu != null || contextMenuAt != null
+    // Hindi audio by default when the stream itself has languages (HLS audio groups, MKV). Tracks show up once it's
+    // playing, so look for a few seconds after each open; choosing another under Audio afterwards sticks
+    LaunchedEffect(engine.opens) {
+        if (current == null) return@LaunchedEffect
+        repeat(20) {
+            delay(500)
+            val tracks = withContext(Dispatchers.IO) { engine.audioTracks() }.filter { it.id() >= 0 }
+            if (tracks.size > 1) {
+                hindiTrack(audioLabels(tracks, item.audioNames))?.let { i -> if (tracks[i].id() != engine.currentAudio()) engine.selectAudio(tracks[i].id()) }
+                return@LaunchedEffect
+            }
+        }
+    }
+    LaunchedEffect(engine.ended) { if (engine.ended && AppSettings.autoPlayNext && index < items.lastIndex) goTo(index + 1) }
+    // An open menu, or the pointer on the seek bar (its preview), holds the controls up
+    var overSeekBar by remember { mutableStateOf(false) }
+    val menuOpen = openMenu != null || contextMenuAt != null || overSeekBar
     // A menu holds the controls up; closing it restarts the 3 s countdown
     LaunchedEffect(lastMove, engine.playing, menuOpen) {
         controlsVisible = true
         if (engine.playing && !menuOpen) { delay(3000); controlsVisible = false }
     }
     LaunchedEffect(Unit) { focus.requestFocus() }
+    KeepScreenAwake(engine.playing)
+    val preview = remember { engine.createPreview() }
+    DisposableEffect(preview) { onDispose { preview.release() } }
+    LaunchedEffect(engine.opened) { preview.open(engine.opened.takeIf { it.isNotEmpty() }) }
 
     fun togglePause() {
         pauseFlash = (pauseFlash.first + 1) to engine.playing
@@ -333,6 +377,7 @@ private fun PlayerContent(engine: VideoEngine, api: MainAPI?, items: List<PlayIt
 
     val menuActions = PlayerMenuActions(
         engine = engine, links = sortLinks(links, maxQuality), current = current, maxQuality = maxQuality, currentAudio = currentAudio,
+        audioNames = item.audioNames,
         onQuality = { q ->
             maxQuality = q; QualityPreference.max = q
             // Switch to the best source under the new cap, keeping the position; if that's the current one and
@@ -418,7 +463,7 @@ private fun PlayerContent(engine: VideoEngine, api: MainAPI?, items: List<PlayIt
         LaunchedEffect(buffering) { if (buffering) delay(500); showBuffering = buffering }
         if (loadingLinks || showBuffering) {
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator(color = NetflixRed)
+                CircularProgressIndicator(color = PlayerAccent)
                 Spacer(Modifier.height(12.dp))
                 if (loadingLinks) Text("Loading sources… (${links.size} found)", color = Color.White)
                 else {
@@ -441,7 +486,7 @@ private fun PlayerContent(engine: VideoEngine, api: MainAPI?, items: List<PlayIt
                     .padding(horizontal = 12.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+                IconButton(onClick = onBack, modifier = Modifier.handCursor()) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
                 Column(Modifier.weight(1f)) {
                     Text(item.title, color = Color.White, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                     current?.let {
@@ -454,7 +499,7 @@ private fun PlayerContent(engine: VideoEngine, api: MainAPI?, items: List<PlayIt
                     .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(6.dp)).padding(horizontal = 12.dp, vertical = 6.dp))
             }
             PlayerBar(
-                engine, Modifier.align(Alignment.BottomCenter), title = item.title,
+                engine, Modifier.align(Alignment.BottomCenter), title = item.title, preview = preview, onSeekBarActive = { overSeekBar = it },
                 hasNext = index < items.lastIndex, nextTitle = items.getOrNull(index + 1)?.title,
                 onNext = { goTo(index + 1) }, onFullscreen = ::toggleFullscreen, onTogglePause = ::togglePause,
                 fullscreen = window?.placement == WindowPlacement.Fullscreen,
@@ -501,7 +546,8 @@ object SubtitlePreference {
         set(v) = prefs.edit().putString("subtitle_language", v).apply()
 }
 
-val NetflixRed = Color(0xFFE50914)
+/** The player's played-part and highlight colour: the accent picked in Settings. */
+val PlayerAccent: Color @Composable get() = MaterialTheme.colorScheme.primary
 
 @Composable
 private fun SubtitleText(text: String, size: Int, modifier: Modifier) {
@@ -514,7 +560,7 @@ private fun SubtitleText(text: String, size: Int, modifier: Modifier) {
 
 @Composable
 private fun PlayerBar(
-    engine: VideoEngine, modifier: Modifier, title: String,
+    engine: VideoEngine, modifier: Modifier, title: String, preview: SeekPreview?, onSeekBarActive: (Boolean) -> Unit,
     hasNext: Boolean, nextTitle: String?, onNext: () -> Unit,
     fullscreen: Boolean, onFullscreen: () -> Unit, onTogglePause: () -> Unit,
     subtitleMenu: @Composable () -> Unit, moreMenu: @Composable () -> Unit,
@@ -525,28 +571,28 @@ private fun PlayerBar(
             .padding(horizontal = 20.dp).padding(top = 40.dp, bottom = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SeekBar(engine.time, engine.length, engine::seekTo, Modifier.weight(1f))
+            SeekBar(engine.time, engine.length, engine::seekTo, Modifier.weight(1f), preview, onSeekBarActive)
             Spacer(Modifier.width(14.dp))
             Text("${formatTime(engine.time)} / ${formatTime(engine.length)}", color = Color.White, fontSize = 14.sp)
         }
         Box(Modifier.fillMaxWidth().padding(top = 4.dp)) {
             val tint = Color.White
             Row(Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onTogglePause, modifier = Modifier.size(52.dp)) {
+                IconButton(onClick = onTogglePause, modifier = Modifier.size(52.dp).handCursor()) {
                     Icon(if (engine.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (engine.playing) "Pause" else "Play", tint = tint, modifier = Modifier.size(40.dp))
                 }
-                IconButton(onClick = { engine.skip(-10_000) }) { Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = tint, modifier = Modifier.size(30.dp)) }
-                IconButton(onClick = { engine.skip(10_000) }) { Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = tint, modifier = Modifier.size(30.dp)) }
+                IconButton(onClick = { engine.skip(-10_000) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = tint, modifier = Modifier.size(30.dp)) }
+                IconButton(onClick = { engine.skip(10_000) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = tint, modifier = Modifier.size(30.dp)) }
                 VolumeControl(engine.volume, engine::changeVolume)
             }
             // Netflix puts the title in the middle of the bar
             Text(title, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.align(Alignment.Center).widthIn(max = 420.dp))
             Row(Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically) {
-                if (hasNext) IconButton(onClick = onNext) { Icon(Icons.Filled.SkipNext, "Next episode${nextTitle?.let { ": $it" } ?: ""}", tint = tint, modifier = Modifier.size(30.dp)) }
+                if (hasNext) IconButton(onClick = onNext, modifier = Modifier.handCursor()) { Icon(Icons.Filled.SkipNext, "Next episode${nextTitle?.let { ": $it" } ?: ""}", tint = tint, modifier = Modifier.size(30.dp)) }
                 subtitleMenu()
                 moreMenu()
-                IconButton(onClick = onFullscreen) { Icon(if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen, "Fullscreen", tint = tint, modifier = Modifier.size(30.dp)) }
+                IconButton(onClick = onFullscreen, modifier = Modifier.handCursor()) { Icon(if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen, "Fullscreen", tint = tint, modifier = Modifier.size(30.dp)) }
             }
         }
     }
@@ -555,6 +601,7 @@ private fun PlayerBar(
 /** Everything the ⋮ and right-click menus can do. */
 class PlayerMenuActions(
     val engine: VideoEngine, val links: List<ExtractorLink>, val current: ExtractorLink?, val maxQuality: Int, val currentAudio: Int,
+    val audioNames: List<String>,
     val onQuality: (Int) -> Unit, val onSource: (ExtractorLink) -> Unit, val onExtensionAudio: (Int) -> Unit,
     val onReload: () -> Unit, val onDownload: () -> Unit,
 )
@@ -562,7 +609,7 @@ class PlayerMenuActions(
 @Composable
 private fun PlayerMoreMenu(actions: PlayerMenuActions, open: Boolean, onOpen: (Boolean) -> Unit) {
     Box {
-        IconButton(onClick = { onOpen(true) }) { Icon(Icons.Filled.MoreVert, "More options", tint = Color.White) }
+        IconButton(onClick = { onOpen(true) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.MoreVert, "More options", tint = Color.White) }
         PlayerMenuContent(actions, open) { onOpen(false) }
     }
 }
@@ -575,10 +622,10 @@ private fun PlayerMenuContent(actions: PlayerMenuActions, expanded: Boolean, onD
     val e = actions.engine
     DropdownMenu(expanded, close) {
         @Composable fun back() = DropdownMenuItem(text = { Text("Back", fontWeight = FontWeight.Bold) }, onClick = { page = null },
-            leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) })
+            leadingIcon = { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) }, modifier = Modifier.handCursor())
         @Composable fun choice(label: String, selected: Boolean, onClick: () -> Unit) = DropdownMenuItem(
             text = { Text(label) }, onClick = { onClick(); close() },
-            leadingIcon = { if (selected) Icon(Icons.Filled.Check, null) else Spacer(Modifier.size(24.dp)) },
+            leadingIcon = { if (selected) Icon(Icons.Filled.Check, null) else Spacer(Modifier.size(24.dp)) }, modifier = Modifier.handCursor(),
         )
         // What Auto is playing now, from the decoded picture: 9/16 of the width so 1920×800 films read as 1080p, the
         // height less libVLC's padding to 16 lines (1080 arrives as 1088), snapped to the usual names
@@ -594,7 +641,7 @@ private fun PlayerMenuContent(actions: PlayerMenuActions, expanded: Boolean, onD
                 @Composable fun entry(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, value: String?, onClick: () -> Unit) =
                     DropdownMenuItem(
                         text = { Row { Text(label, Modifier.weight(1f)); value?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) } } },
-                        leadingIcon = { Icon(icon, null) }, onClick = onClick, modifier = Modifier.widthIn(min = 260.dp),
+                        leadingIcon = { Icon(icon, null) }, onClick = onClick, modifier = Modifier.widthIn(min = 260.dp).handCursor(),
                     )
                 entry(Icons.Filled.Speed, "Speed", "${e.rate}x") { page = "speed" }
                 entry(Icons.Filled.HighQuality, "Quality", qualityLabel) { page = "quality" }
@@ -624,7 +671,9 @@ private fun PlayerMenuContent(actions: PlayerMenuActions, expanded: Boolean, onD
                 back()
                 val extensionAudio = actions.current?.audioTracks.orEmpty()
                 if (extensionAudio.size > 1) extensionAudio.forEachIndexed { i, a -> choice(audioLabel(a.url, i), i == actions.currentAudio) { actions.onExtensionAudio(i) } }
-                else e.audioTracks().filter { it.id() >= 0 }.forEach { t -> choice(t.description(), t.id() == e.currentAudio()) { e.selectAudio(t.id()) } }
+                else e.audioTracks().filter { it.id() >= 0 }.let { tracks ->
+                    tracks.zip(audioLabels(tracks, actions.audioNames)).forEach { (t, label) -> choice(label, t.id() == e.currentAudio()) { e.selectAudio(t.id()) } }
+                }
             }
         }
     }
@@ -645,14 +694,14 @@ private fun SubtitleMenu(
     onPick: (SubtitleOption?) -> Unit, onSize: (Int) -> Unit, onDelay: (Long) -> Unit,
 ) {
     Box {
-        IconButton(onClick = { onOpen(true) }) {
-            Icon(Icons.Filled.Subtitles, "Subtitles", tint = if (selected != null) NetflixRed else Color.White)
+        IconButton(onClick = { onOpen(true) }, modifier = Modifier.handCursor()) {
+            Icon(Icons.Filled.Subtitles, "Subtitles", tint = if (selected != null) PlayerAccent else Color.White)
         }
         DropdownMenu(open, { onOpen(false) }) {
             @Composable fun item(label: String, isSelected: Boolean, close: Boolean = true, onClick: () -> Unit) = DropdownMenuItem(
                 text = { Text(label) }, onClick = { onClick(); if (close) onOpen(false) },
                 leadingIcon = { if (isSelected) Icon(Icons.Filled.Check, null) else Spacer(Modifier.size(24.dp)) },
-                modifier = Modifier.widthIn(min = 240.dp),
+                modifier = Modifier.widthIn(min = 240.dp).handCursor(),
             )
             item("Off", selected == null) { onPick(null) }
             if (options.isEmpty()) DropdownMenuItem(text = { Text("No subtitles for this video", color = MaterialTheme.colorScheme.onSurfaceVariant) }, onClick = {}, enabled = false)
@@ -661,13 +710,13 @@ private fun SubtitleMenu(
             item("Text size: ${size}", false, close = false) {}
             Row(Modifier.padding(horizontal = 12.dp)) {
                 listOf(18 to "Small", 24 to "Medium", 32 to "Large", 40 to "Huge").forEach { (v, l) ->
-                    FilterChip(selected = v == size, onClick = { onSize(v) }, label = { Text(l) }, modifier = Modifier.padding(end = 4.dp))
+                    FilterChip(selected = v == size, onClick = { onSize(v) }, label = { Text(l) }, modifier = Modifier.padding(end = 4.dp).handCursor())
                 }
             }
             Row(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Delay ${"%+.1f".format(delayMs / 1000.0)} s", Modifier.weight(1f))
-                TextButton(onClick = { onDelay(delayMs - 500) }) { Text("−0.5") }
-                TextButton(onClick = { onDelay(delayMs + 500) }) { Text("+0.5") }
+                TextButton(onClick = { onDelay(delayMs - 500) }, modifier = Modifier.handCursor()) { Text("−0.5") }
+                TextButton(onClick = { onDelay(delayMs + 500) }, modifier = Modifier.handCursor()) { Text("+0.5") }
             }
         }
     }
@@ -681,10 +730,29 @@ private val youtubeAudioPreference = listOf("251", "140", "250", "249", "139")
 /** Extension audio tracks carry only a URL, so label them by number and, when the URL says, format. */
 fun audioLabel(url: String, index: Int) = mimeParam.find(url)?.groupValues?.get(1)?.let { "Audio ${index + 1} ($it)" } ?: "Audio ${index + 1}"
 
-/** The track to start with: the first, except on YouTube where the first is its lowest bitrate. */
+// "Hindi", "hin", "hi" as track names or language tags ("Hindi - [hin]", "Track 2 - [hi]", "hi-IN")
+private val hindiLabel = Regex("""(?i)\bhindi\b|\[(hin|hi)(-[a-z]+)?]|^(hin|hi)(-[a-z]+)?$""")
+// YouTube's dubbed audio says its language in the URL: xtags=...lang=hi, or lang=hi
+private val hindiUrl = Regex("""(?i)lang(=|%3D)hi(\b|-|%2D|$)""")
+
+/**
+ * What to call libVLC's audio [tracks]: the saved [names] of a downloaded file's tracks when there's one per track
+ * (libVLC lists them in the order they were merged), otherwise libVLC's own descriptions.
+ */
+fun audioLabels(tracks: List<uk.co.caprica.vlcj.player.base.TrackDescription>, names: List<String>): List<String> =
+    if (names.size == tracks.size) names else tracks.map { it.description() }
+
+/** The Hindi one among [labels] (libVLC's track descriptions), or null when there's none. */
+fun hindiTrack(labels: List<String>): Int? = labels.indexOfFirst { hindiLabel.containsMatchIn(it.trim()) }.takeIf { it >= 0 }
+
+/**
+ * The track to start with: Hindi when there is one, otherwise the first; on YouTube the best of its formats, since
+ * its first is the lowest bitrate.
+ */
 fun defaultAudio(urls: List<String>): Int {
-    // shortcut: only YouTube's itag is understood; other extensions list their main track first anyway
+    // shortcut: only YouTube's itag and lang are understood; other extensions list their main track first anyway
     val itags = urls.map { itagParam.find(it)?.groupValues?.get(1) }
-    return youtubeAudioPreference.firstNotNullOfOrNull { tag -> itags.indexOf(tag).takeIf { it >= 0 } } ?: 0
+    val candidates = urls.indices.filter { hindiUrl.containsMatchIn(urls[it]) }.ifEmpty { urls.indices.toList() }
+    return youtubeAudioPreference.firstNotNullOfOrNull { tag -> candidates.firstOrNull { itags[it] == tag } } ?: candidates.firstOrNull() ?: 0
 }
 

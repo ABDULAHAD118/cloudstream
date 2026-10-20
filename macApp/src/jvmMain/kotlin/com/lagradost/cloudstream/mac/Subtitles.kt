@@ -29,7 +29,8 @@ object SubtitleParser {
         return ((h.toLongOrNull() ?: 0) * 3600 + min.toLong() * 60 + s.toLong()) * 1000 + ms
     }
 
-    private fun clean(line: String) = line.replace(tags, "").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").trim()
+    // <br> is a line break (Netflix-style WebVTT uses it); other tags are styling and go
+    private fun clean(line: String) = line.replace(Regex("(?i)<br\\s*/?>"), "\n").replace(tags, "").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").trim()
 
     /** SRT and WebVTT share the same shape: an optional id line, "start --> end", then text up to a blank line. */
     private fun parseSrtOrVtt(body: String): List<Cue> {

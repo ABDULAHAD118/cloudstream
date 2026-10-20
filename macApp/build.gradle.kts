@@ -7,6 +7,9 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+// -PcsBuildDir=… builds somewhere else, so tests can run while `run` is using macApp/build (it loads classes from there)
+(findProperty("csBuildDir") as String?)?.let { layout.buildDirectory.set(file(it)) }
+
 kotlin {
     jvm {}
     sourceSets {
@@ -23,6 +26,7 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.coroutines.swing)
             implementation(libs.nicehttp)
+            implementation(libs.jackson.module.kotlin) // IMDb info and its cache, with the library's own JSON mapper
             implementation(libs.newpipeextractor) // the library's YouTube support needs a downloader from the app
             implementation(libs.ktor.http) // HlsPlaylistParser's variant URLs, for the download quality picker
             // Material icons (1.7.3 is the last published; the icons are plain vectors, so they work with newer Compose)
@@ -48,7 +52,7 @@ kotlin {
 
 tasks.withType<Test> {
     systemProperty("cloudstream.dataDir", layout.buildDirectory.dir("test-data").get().asFile.path)
-    environment("CS_SMOKE", System.getenv("CS_SMOKE") ?: "")
+    listOf("CS_SMOKE", "CS_VLC_LOG", "CS_PROXY_LOG", "CS_HTTP_LOG").forEach { environment(it, System.getenv(it) ?: "") }
     testLogging { showStandardStreams = true }
 }
 
