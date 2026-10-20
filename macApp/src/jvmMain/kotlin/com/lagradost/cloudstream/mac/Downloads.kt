@@ -22,7 +22,7 @@ import java.io.RandomAccessFile
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-enum class DownloadStatus { Queued, Downloading, Done, Failed, Cancelled }
+enum class DownloadStatus { Queued, Downloading, Paused, Done, Failed, Cancelled }
 
 /** What's needed to (re)start a download: the stream, its headers and the separate audio track if any. */
 data class DownloadSource(
@@ -34,6 +34,10 @@ data class DownloadSource(
     val label: String = "",
     /** HLS audio tracks kept separate from the video (one per language); all of them go into the file. */
     val hlsAudio: List<String> = emptyList(),
+    /** Their names from the playlist ("Hindi"), in the same order. The merged file loses them, so the player shows these. */
+    val hlsAudioNames: List<String> = emptyList(),
+    /** English subtitle playlists declared in the HLS master, saved beside the video as .srt. */
+    val hlsSubtitles: List<String> = emptyList(),
 )
 
 data class Download(
@@ -46,6 +50,8 @@ data class Download(
     val progress: Float = 0f,
     val error: String? = null,
     val subtitles: List<String> = emptyList(),
+    /** The episode data for the extension's loadLinks, to get a fresh link when the saved one has expired. */
+    val data: String? = null,
 )
 
 /**
@@ -53,24 +59,21 @@ data class Download(
  * parallel (byte ranges for files, segments for HLS, using the library's M3u8Helper2 as Android does), which
  * also stops YouTube from throttling a single long request. libVLC is only used locally, to merge a separate
  * audio track into one MKV (seconds), and for DASH, which it fetches itself.
- * shortcut: no pause/resume; a cancelled or failed download restarts from the beginning with Retry.
+ * Downloads pause and resume, and pick up where they stopped after the app restarts: files remember which byte
+ * ranges are done and HLS how many segments, in small `.part` notes beside the data. Streams libVLC writes
+ * (DASH, and HLS playlists the library can't read) start over.
  */
 object Downloads {
-    val folder get() = File(System.getProperty("cloudstream.downloadDir") ?: "${System.getProperty("user.home")}/Movies/CloudStream")
+    val folder get() = File(System.getProperty("cloudstream.downloadDir") ?: AppSettings.downloadFolder ?: "${System.getProperty("user.home")}/Movies/CloudStream")
     private val listFile = File(Extensions.dataDir, "downloads.json")
-    private const val PARALLEL_DOWNLOADS = 2
-    private const val CONNECTIONS = 4 // per download
     private const val CHUNK = 8L * 1024 * 1024
 
     private data class Saved(val items: List<Download> = emptyList())
 
     val items = mutableStateListOf<Download>().apply {
-        // A download that was running when the app quit can't continue, so mark it for Retry
+        // Downloads that were running when the app quit carry on from where they stopped (see the init below)
         val saved = runCatching { parseJson(listFile.readText(), Saved::class).items }.getOrDefault(emptyList())
-        addAll(saved.map {
-            if (it.status == DownloadStatus.Downloading || it.status == DownloadStatus.Queued)
-                it.copy(status = DownloadStatus.Failed, error = "Interrupted when the app closed") else it
-        })
+        addAll(saved.map { if (it.status == DownloadStatus.Downloading) it.copy(status = DownloadStatus.Queued) else it })
     }
 
     private val client by lazy { app.baseClient.newBuilder().callTimeout(0, TimeUnit.MILLISECONDS).readTimeout(60, TimeUnit.SECONDS).build() }
@@ -100,7 +103,7 @@ object Downloads {
             .lowercase().takeIf { it in setOf("mp4", "mkv", "webm", "mov", "avi", "m4v", "ts") } ?: "mp4"
     }
 
-    fun enqueue(title: String, apiName: String, source: DownloadSource, subtitles: List<SubtitleFile> = emptyList()): Download {
+    fun enqueue(title: String, apiName: String, source: DownloadSource, subtitles: List<SubtitleFile> = emptyList(), data: String? = null): Download {
         folder.mkdirs()
         val base = title.replace(Regex("""[/\\:*?"<>|]"""), "_").trim().take(150).ifEmpty { "video" }
         val quality = if (source.quality > 0) " ${source.quality}p" else ""
@@ -108,17 +111,19 @@ object Downloads {
         var file = File(folder, "$base$quality.$ext")
         var n = 2
         while (file.exists() || items.any { it.file == file.path }) file = File(folder, "$base$quality ($n).$ext").also { n++ }
-        val download = Download(UUID.randomUUID().toString(), title, apiName, file.path, source)
+        val download = Download(UUID.randomUUID().toString(), title, apiName, file.path, source, data = data)
         synchronized(this) { items.add(0, download); save() }
         AppScope.launch { saveSubtitles(download, subtitles) }
         startNext()
         return download
     }
 
-    /** Subtitles go next to the video with the same name, so any player picks them up. */
+    /** English subtitles go next to the video with the same name, so any player picks them up; others are left out. */
     private suspend fun saveSubtitles(download: Download, subtitles: List<SubtitleFile>) {
         val video = File(download.file)
-        val saved = subtitles.mapIndexedNotNull { i, sub ->
+        // One English file is enough; a stream's own English subtitles win over the extension's
+        val fromExtension = if (download.source.hlsSubtitles.isEmpty()) listOfNotNull(bestEnglish(subtitles.filter { isEnglish(it.lang) }) { it.lang }) else emptyList()
+        val saved = fromExtension.mapIndexedNotNull { i, sub ->
             runCatching {
                 val ext = sub.url.substringBefore('?').substringAfterLast('.', "srt").take(4)
                 val lang = sub.lang.replace(Regex("[^\\w-]"), "_")
@@ -126,14 +131,32 @@ object Downloads {
                     writeText(app.get(sub.url, headers = sub.headers ?: emptyMap()).text)
                 }.path
             }.getOrNull()
+        } + download.source.hlsSubtitles.mapIndexedNotNull { i, url ->
+            // Subtitles inside the HLS stream are WebVTT in pieces; join them into one .srt
+            runCatching {
+                val cues = HlsSubtitles.load(HlsSubtitleTrack("English", "en", url)) { u -> runBlocking { app.get(u, headers = download.source.headers).text } }
+                check(cues.isNotEmpty()) { "no cues" }
+                File(video.parentFile, "${video.nameWithoutExtension}.English${if (i > 0) ".$i" else ""}.srt").apply { writeText(toSrt(cues)) }.path
+            }.getOrNull()
         }
         if (saved.isNotEmpty()) update(download.id) { it.copy(subtitles = saved) }
     }
 
+    /** Starts it again, from where it stopped when its data is still there. */
     fun retry(id: String) {
-        update(id) { it.copy(status = DownloadStatus.Queued, progress = 0f, error = null) }
+        update(id) { it.copy(status = DownloadStatus.Queued, error = null) }
         startNext()
     }
+
+    /** Stops it, keeping what's downloaded for [resume]. */
+    fun pause(id: String) {
+        val job = synchronized(this) { jobs.remove(id) }
+        update(id) { it.copy(status = DownloadStatus.Paused) }
+        job?.cancel()
+        startNext()
+    }
+
+    fun resume(id: String) = retry(id)
 
     fun cancel(id: String) {
         val job = synchronized(this) { jobs.remove(id) }
@@ -141,6 +164,12 @@ object Downloads {
         job?.cancel()
         items.firstOrNull { it.id == id }?.let { partFiles(it).forEach(File::delete) }
         startNext()
+    }
+
+    /** Drops finished downloads whose file was deleted outside the app (in Finder, say). */
+    fun forgetMissing() {
+        val gone = items.filter { it.status == DownloadStatus.Done && !File(it.file).exists() }
+        if (gone.isNotEmpty()) synchronized(this) { items.removeAll(gone.toSet()); save() }
     }
 
     /** Removes the entry, and its files unless [keepFile]. */
@@ -154,12 +183,23 @@ object Downloads {
     private fun partFiles(d: Download) = listOf(File(d.file)) +
         (File(d.file).parentFile?.listFiles { f -> f.name.startsWith(File(d.file).name + ".") && f.name.endsWith(".part") }.orEmpty())
 
+    /** Starts queued downloads after the limit is raised in Settings; lowering it lets running ones finish. */
+    fun limitChanged() = startNext()
+
     @Synchronized private fun startNext() {
-        while (jobs.size < PARALLEL_DOWNLOADS) {
+        while (jobs.size < AppSettings.parallelDownloads) {
             val next = items.lastOrNull { it.status == DownloadStatus.Queued } ?: return // oldest first
-            update(next.id) { it.copy(status = DownloadStatus.Downloading, progress = 0f, error = null) }
+            update(next.id) { it.copy(status = DownloadStatus.Downloading, error = null) }
             jobs[next.id] = AppScope.launch {
-                val error = try { run(next); null } catch (e: CancellationException) { throw e } catch (t: Throwable) { t.message ?: t.toString() }
+                val error = try { run(next); null } catch (e: CancellationException) { throw e } catch (t: Throwable) {
+                    // Stream links expire (resuming after a restart, say): get a fresh one for the same quality and carry on
+                    val fresh = try { refreshedSource(next) } catch (e: CancellationException) { throw e } catch (_: Throwable) { null }
+                    if (fresh == null) t.message ?: t.toString()
+                    else try {
+                        update(next.id) { it.copy(source = fresh) }
+                        run(next.copy(source = fresh)); null
+                    } catch (e: CancellationException) { throw e } catch (t2: Throwable) { t2.message ?: t2.toString() }
+                }
                 finish(next.id, error)
             }
         }
@@ -168,8 +208,8 @@ object Downloads {
     private fun finish(id: String, error: String?) {
         synchronized(this) { if (jobs.remove(id) == null) return } // cancelled meanwhile
         val download = items.firstOrNull { it.id == id } ?: return
+        // A failed download keeps what it has, so Retry carries on from there
         val ok = error == null && File(download.file).length() > 0
-        if (!ok) partFiles(download).forEach(File::delete)
         update(id) {
             if (ok) it.copy(status = DownloadStatus.Done, progress = 1f)
             else it.copy(status = DownloadStatus.Failed, error = error ?: "Nothing was downloaded")
@@ -184,6 +224,16 @@ object Downloads {
         val persist = now - lastSaved > 5000
         if (persist) lastSaved = now
         update(id, persist) { it.copy(progress = value.coerceIn(0f, 0.999f)) }
+    }
+
+    /** The same quality from a fresh set of the extension's links, or null when there's nothing new to try. */
+    private suspend fun refreshedSource(d: Download): DownloadSource? {
+        val data = d.data ?: return null
+        val api = com.lagradost.cloudstream3.APIHolder.allProviders.firstOrNull { it.name == d.apiName } ?: return null
+        val links = mutableListOf<ExtractorLink>()
+        runCatching { api.loadLinks(data, false, {}, { links += it }) }
+        val options = links.flatMap { runCatching { downloadOptions(it) }.getOrDefault(emptyList()) }.filter { it.type == d.source.type && it.url != d.source.url }
+        return options.firstOrNull { it.label == d.source.label && it.quality == d.source.quality } ?: options.firstOrNull { it.quality == d.source.quality }
     }
 
     private suspend fun run(d: Download) {
@@ -262,16 +312,26 @@ object Downloads {
             }
             return@withContext
         }
-        RandomAccessFile(dest, "rw").use { it.setLength(total) }
         val chunks = (0 until total step CHUNK).map { it to minOf(it + CHUNK, total) - 1 }
-        val gate = Semaphore(CONNECTIONS)
-        var done = 0L
+        // How far an earlier run (paused, or the app closed) got in each chunk: line 1 is the size, then
+        // "chunk position" lines as it went, the furthest one counting. A different size starts over
+        val notes = File("${dest.path}.chunks.part")
+        val reached = runCatching { notes.readLines() }.getOrNull()
+            ?.takeIf { it.firstOrNull()?.toLongOrNull() == total && dest.length() == total }
+            ?.drop(1)?.mapNotNull { line -> line.split(' ').takeIf { it.size == 2 }?.let { it[0].toIntOrNull() to it[1].toLongOrNull() } }
+            ?.filter { (i, p) -> i != null && p != null }?.groupBy({ it.first!! }, { it.second!! })?.mapValues { it.value.max() }
+            ?: emptyMap<Int, Long>().also { notes.writeText("$total\n") }
+        RandomAccessFile(dest, "rw").use { if (it.length() != total) it.setLength(total) }
+        val gate = Semaphore(AppSettings.downloadConnections)
+        var done = chunks.indices.sumOf { i -> (reached[i] ?: chunks[i].first) - chunks[i].first }
         coroutineScope {
-            chunks.map { (from, to) ->
+            chunks.withIndex().filter { (i, range) -> (reached[i] ?: range.first) <= range.second }.map { (index, range) ->
+                val (from, to) = range
                 async {
                     gate.withPermit {
                         // Hosts drop connections now and then; resume this chunk where it stopped, a few times
-                        var pos = from
+                        var pos = reached[index] ?: from
+                        var noted = pos
                         var attempt = 0
                         while (pos <= to) {
                             try {
@@ -285,12 +345,16 @@ object Downloads {
                                                 ensureActive()
                                                 val n = input.read(buffer).takeIf { it >= 0 } ?: break
                                                 file.write(buffer, 0, n); pos += n
-                                                synchronized(chunks) { done += n; onProgress(done.toFloat() / total) }
+                                                synchronized(chunks) {
+                                                    done += n; onProgress(done.toFloat() / total)
+                                                    if (pos - noted >= 1024 * 1024) { notes.appendText("$index $pos\n"); noted = pos }
+                                                }
                                             }
                                         }
                                     }
                                 }
                                 check(pos > to) { "The connection closed early" }
+                                synchronized(chunks) { notes.appendText("$index $pos\n") }
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
@@ -302,6 +366,7 @@ object Downloads {
                 }
             }.awaitAll()
         }
+        notes.delete()
     }
 
     /** Runs [block] again (up to 4 more times, with a growing pause) when the connection fails. */
@@ -328,21 +393,32 @@ object Downloads {
         }
         val gate = Semaphore(6)
         val part = File("${dest.path}.part") // per output: video and audio tracks download side by side
-        part.outputStream().use { out ->
-            var written = 0
+        // Segments an earlier run already wrote, as "segments-in-playlist written bytes"; another playlist starts over
+        val notes = File("${dest.path}.segments.part")
+        val (startAt, keep) = runCatching { notes.readText().trim().split(' ').map(String::toLong) }.getOrNull()
+            ?.takeIf { it.size == 3 && it[0] == hls.size.toLong() && part.length() >= it[2] }
+            ?.let { it[1].toInt() to it[2] } ?: (0 to 0L)
+        RandomAccessFile(part, "rw").use { it.setLength(keep) } // drops a segment that was cut off halfway
+        java.io.FileOutputStream(part, true).use { out ->
+            var written = startAt
+            var bytes = keep
+            onProgress(written.toFloat() / hls.size)
             coroutineScope {
                 // Fetch ahead in windows so memory stays bounded while connections stay busy
-                for (window in (0 until hls.size).chunked(24)) {
+                for (window in (startAt until hls.size).chunked(24)) {
                     val parts = window.map { i -> async { gate.withPermit { hls.resolveLinkSafe(i) } } }
-                    for (bytes in parts) {
-                        out.write(bytes.await() ?: error("A segment failed to download"))
-                        written++
+                    for (segment in parts) {
+                        val data = segment.await() ?: error("A segment failed to download")
+                        out.write(data)
+                        written++; bytes += data.size
+                        notes.writeText("${hls.size} $written $bytes")
                         onProgress(written.toFloat() / hls.size)
                     }
                 }
             }
         }
         check(part.renameTo(dest)) { "Couldn't move the finished file into place" }
+        notes.delete()
     }
 
     /** Runs libVLC's stream output from [input] (+ [audio]) into [dest]; local inputs finish in seconds. */
@@ -374,6 +450,39 @@ object Downloads {
             withContext(NonCancellable) { player.controls().stop(); player.release() }
         }
     }
+
+    // Placed last, so everything above is set up before the downloads interrupted by quitting start again
+    init { AppScope.launch { startNext() } }
+}
+
+/**
+ * The plain English one among several English subtitles (hosts often add "English [CC]", with sound descriptions,
+ * and numbered alternates such as "English (1)"), else the first.
+ */
+fun <T> bestEnglish(tracks: List<T>, label: (T) -> String): T? = tracks.firstOrNull {
+    val l = label(it)
+    !l.contains("[CC]", true) && !l.contains("SDH", true) && !Regex("""\(\d+\)""").containsMatchIn(l)
+} ?: tracks.firstOrNull()
+
+/** Cues as a SubRip file, which every player reads. */
+fun toSrt(cues: List<Cue>): String {
+    fun time(ms: Long) = "%02d:%02d:%02d,%03d".format(ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+    return cues.withIndex().joinToString("\n") { (i, c) -> "${i + 1}\n${time(c.startMs)} --> ${time(c.endMs)}\n${c.text}\n" }
+}
+
+// "English", "eng", "en", "en-US", as track names or language tags; audio-description tracks don't count
+private val englishLabel = Regex("""(?i)\benglish\b|\[(en|eng)([-_][a-z]+)?]|^(en|eng)([-_. (\[].*)?$""")
+
+fun isEnglish(label: String) = englishLabel.containsMatchIn(label.trim()) && !label.contains("description", ignoreCase = true)
+
+/**
+ * The audio tracks a download keeps: Hindi and English, Hindi first, since players start with the first track.
+ * When neither is there, all of them, so the file still has its original language.
+ */
+fun <T> keptLanguages(tracks: List<T>, label: (T) -> String): List<T> {
+    val hindi = tracks.filter { hindiTrack(listOf(label(it))) != null }
+    val english = tracks.filter { it !in hindi && isEnglish(label(it)) }
+    return (hindi + english).ifEmpty { tracks }
 }
 
 /**
@@ -383,14 +492,24 @@ object Downloads {
 suspend fun downloadOptions(link: ExtractorLink): List<DownloadSource> {
     if (link.type != ExtractorLinkType.M3U8) return listOf(Downloads.sourceFor(link))
     val headers = Player.headersFor(link)
-    val playlist = runCatching {
-        com.lagradost.cloudstream3.utils.HlsPlaylistParser.parse(link.url, app.get(link.url, headers = headers).text)
-    }.getOrNull() ?: return listOf(Downloads.sourceFor(link))
+    val master = runCatching { app.get(link.url, headers = headers).text }.getOrNull() ?: return listOf(Downloads.sourceFor(link))
+    val playlist = runCatching { com.lagradost.cloudstream3.utils.HlsPlaylistParser.parse(link.url, master) }.getOrNull()
+        ?: return listOf(Downloads.sourceFor(link))
+    val englishSubtitles = listOfNotNull(
+        bestEnglish(HlsSubtitles.tracks(link.url, master).filter { isEnglish(it.name) || isEnglish("[${it.language}]") }) { it.name }?.playlistUrl
+    )
     val variants = playlist.variants.filter { it.isPlayableStandalone(playlist) }.ifEmpty { playlist.variants.filter { !it.isTrickPlay() } }
     return variants.map { v ->
         // Variants whose sound is a separate audio group (one track per language) take all of that group along
-        val audio = playlist.audios.filter { it.groupId == v.audioGroupId }.mapNotNull { it.url?.toString() }.distinct()
-        Downloads.sourceFor(link, v.url.toString(), v.format.height.coerceAtLeast(0), link.name).copy(hlsAudio = audio)
+        // Hindi goes first: players, this one and others, start with the file's first audio track
+        val audio = keptLanguages(playlist.audios.filter { it.groupId == v.audioGroupId && it.url != null }.distinctBy { it.url.toString() }) { r ->
+            listOfNotNull(r.name, r.format.language?.let { "[$it]" }).joinToString(" ")
+        }
+        Downloads.sourceFor(link, v.url.toString(), v.format.height.coerceAtLeast(0), link.name).copy(
+            hlsAudio = audio.map { it.url.toString() },
+            hlsAudioNames = audio.map { r -> r.name.ifBlank { r.format.language ?: "Audio" } },
+            hlsSubtitles = englishSubtitles,
+        )
     }
         .distinctBy { it.url }.sortedByDescending { it.quality }.ifEmpty { listOf(Downloads.sourceFor(link)) }
 }

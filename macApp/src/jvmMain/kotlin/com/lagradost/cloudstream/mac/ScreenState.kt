@@ -4,12 +4,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.SearchResponse
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.*
 
 /** Work that must outlive the screen that started it (leaving Home mid-load shouldn't cancel the load). */
 val AppScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+/** A featured title on Home's carousel; [details] (backdrop, logo, plot) arrive after the row does. */
+data class HeroItem(val search: SearchResponse, val details: LoadResponse? = null)
 
 /**
  * Home's state lives here rather than in the screen, as in Android's HomeViewModel: opening a title and coming
@@ -26,6 +33,8 @@ object HomeState {
     var loading by mutableStateOf(false)
         private set
     var error by mutableStateOf<String?>(null)
+        private set
+    var hero by mutableStateOf(listOf<HeroItem>())
         private set
     val loadingMore = mutableStateListOf<MainPageRequest>()
     private val lock = Any() // pages arrive on several threads; each merge reads and replaces rows
@@ -44,17 +53,34 @@ object HomeState {
 
     fun load(api: MainAPI) {
         job?.cancel()
-        rows = emptyList(); error = null; loading = true; loadedFor = api.name
+        rows = emptyList(); hero = emptyList(); error = null; loading = true; loadedFor = api.name
         job = AppScope.launch {
             api.mainPage.map { page ->
                 async {
                     val request = MainPageRequest(page.name, page.data, page.horizontalImages)
                     runCatching { api.getMainPage(1, request) }
-                        .onSuccess { res -> synchronized(lock) { rows = mergeHomePage(rows, request, 1, res) } }
+                        .onSuccess { res ->
+                            val picks = synchronized(lock) {
+                                rows = mergeHomePage(rows, request, 1, res)
+                                rows.firstOrNull()?.items?.take(6)?.takeIf { hero.isEmpty() }?.also { p -> hero = p.map { HeroItem(it) } }
+                            }
+                            picks?.let { startHero(api, it) }
+                        }
                         .onFailure { if (it !is CancellationException) error = it.message ?: it.toString() }
                 }
             }.awaitAll()
             loading = false
+        }
+    }
+
+    /** Fills the carousel from the first row, then loads each title's page for its backdrop and logo, 3 at a time. */
+    private fun CoroutineScope.startHero(api: MainAPI, picks: List<SearchResponse>) {
+        val limit = Semaphore(3)
+        picks.forEach { item ->
+            launch {
+                val details = limit.withPermit { runCatching { api.load(item.url) }.getOrNull() } ?: return@launch
+                synchronized(lock) { hero = hero.map { if (it.search.url == item.url) it.copy(details = details) else it } }
+            }
         }
     }
 

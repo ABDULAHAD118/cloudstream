@@ -70,7 +70,12 @@ class VideoEngine : AutoCloseable {
 
     /** A length read from the stream itself (HLS playlist), which beats libVLC's estimate. */
     fun useKnownLength(ms: Long) { knownLength = ms; length = ms }
-    @Volatile private var opened = ""
+    /** The URL playing now (through the proxy when it needs headers), for the seek bar preview. */
+    var opened by mutableStateOf("")
+        private set
+    /** Counts opens, so the screen can react to each one, including the same URL reopened (quality change). */
+    var opens by mutableIntStateOf(0)
+        private set
     private var info: ImageInfo? = null
     private var pixels = ByteArray(0)
     // A 1080p frame is 8 MB of native memory; free each one a few frames later instead of waiting for a GC pause
@@ -133,8 +138,8 @@ class VideoEngine : AutoCloseable {
     /** [audioUrl] is a separate audio stream to play alongside, for sites (YouTube) that serve video-only streams. */
     fun open(url: String, referer: String?, userAgent: String?, startAtMs: Long, audioUrl: String? = null, maxHeight: Int? = null) { // null maxHeight: adaptive
         ended = false; failed = false; buffering = true; time = startAtMs; length = 0; knownLength = null; frame = null
-        pendingSeek = startAtMs
         opened = url
+        opens++
         val options = listOfNotNull(
             referer?.let { ":http-referrer=$it" }, userAgent?.let { ":http-user-agent=$it" }, audioUrl?.let { ":input-slave=$it" },
             // HLS/DASH adapt to the connection on their own (Auto); a chosen quality fixes the best variant under it
@@ -142,9 +147,14 @@ class VideoEngine : AutoCloseable {
             // The app draws subtitles itself; stop libVLC drawing stream subtitles or sidecar files a second time
             ":no-sub-autodetect-file", if (url.startsWith("http")) ":no-spu" else null,
         )
-        player.media().play(url, *options.toTypedArray())
-        player.controls().setRate(rate)
-        player.audio().setVolume(volume)
+        // Off the UI thread, in order: play() first stops the old media, which blocks while a slow stream is
+        // stuck buffering, and froze the window when switching quality or source mid-buffer
+        player.submit {
+            pendingSeek = startAtMs // set here, so a late tick from the old media can't use it up
+            player.media().play(url, *options.toTypedArray())
+            player.controls().setRate(rate)
+            player.audio().setVolume(volume)
+        }
     }
 
     fun togglePause() = if (ended) player.controls().play() else player.controls().pause()
@@ -161,9 +171,12 @@ class VideoEngine : AutoCloseable {
     fun currentAudio(): Int = player.audio().track()
     fun selectAudio(id: Int) { player.audio().setTrack(id) }
 
+    /** A silent second player on this engine's libVLC, for seek bar thumbnails. Release it when done. */
+    fun createPreview() = SeekPreview(factory)
+
     /** Stops playback and clears the picture, keeping the engine for the next video. */
     fun stop() {
-        player.controls().stop()
+        player.submit { player.controls().stop() } // can block like play(), see open()
         playing = false; buffering = false; frame = null
     }
 

@@ -66,6 +66,36 @@ class PlayerTest {
     }
 
     @Test
+    fun downloadsKeepHindiAndEnglishOnly() {
+        val netflix = listOf("1. Czech [ces]", "3. English [eng]", "4. English - Audio Description [eng]", "9. Hindi [hin]", "17. Tamil [tam]")
+        assertEquals(listOf("9. Hindi [hin]", "3. English [eng]"), keptLanguages(netflix) { it })
+        assertEquals(listOf("English - [en]"), keptLanguages(listOf("Korean - [ko]", "English - [en]")) { it })
+        // Neither there: everything stays, so the original language isn't lost
+        assertEquals(listOf("Korean", "Japanese"), keptLanguages(listOf("Korean", "Japanese")) { it })
+        assertEquals(listOf(true, true, true, false, false), listOf("English [CC]", "en", "[eng]", "Bengali", "French").map(::isEnglish))
+        assertEquals("English", bestEnglish(listOf("English (1)", "English [CC]", "English", "English SDH")) { it })
+        assertEquals("English [CC]", bestEnglish(listOf("English [CC]")) { it })
+        assertEquals("1\n00:00:01,500 --> 01:02:03,004\nHi\nthere\n", toSrt(listOf(Cue(1500, 3_723_004, "Hi\nthere"))))
+    }
+
+    @Test
+    fun hindiAudioIsPreferred() {
+        // libVLC's names for HLS audio groups and MKV tracks
+        assertEquals(1, hindiTrack(listOf("English - [eng]", "Hindi - [hin]", "Tamil - [tam]")))
+        assertEquals(2, hindiTrack(listOf("Track 1 - [en]", "Track 2 - [ta]", "Track 3 - [hi]")))
+        assertEquals(0, hindiTrack(listOf("hi-IN", "en-US")))
+        assertEquals(null, hindiTrack(listOf("English - [eng]", "Chinese - [chi]", "Hindustani notes")))
+        // YouTube dubs: the Hindi ones win, and among them the best format
+        val dubbed = listOf(
+            "https://x/videoplayback?itag=251&xtags=acont%3Doriginal%3Alang%3Den&mime=audio%2Fwebm",
+            "https://x/videoplayback?itag=140&xtags=acont%3Ddubbed%3Alang%3Dhi&mime=audio%2Fmp4",
+            "https://x/videoplayback?itag=251&xtags=acont%3Ddubbed%3Alang%3Dhi&mime=audio%2Fwebm",
+        )
+        assertEquals(2, defaultAudio(dubbed))
+        assertEquals(0, defaultAudio(dubbed.take(1)))
+    }
+
+    @Test
     fun downloadsAreSavedInAFittingFileType() {
         fun ext(url: String, type: ExtractorLinkType, audio: String? = null) = Downloads.extensionFor(DownloadSource(url, type, emptyMap(), audio))
         assertEquals("ts", ext("https://h/master.m3u8", ExtractorLinkType.M3U8))

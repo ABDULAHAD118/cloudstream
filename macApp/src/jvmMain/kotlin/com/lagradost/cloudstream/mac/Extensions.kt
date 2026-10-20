@@ -18,7 +18,7 @@ import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 // Same JSON shapes as the Android app's RepositoryManager; unknown fields are ignored by the library's mapper.
-data class Repository(val name: String, val description: String? = null, val pluginLists: List<String> = emptyList())
+data class Repository(val name: String, val description: String? = null, val iconUrl: String? = null, val pluginLists: List<String> = emptyList())
 
 data class SitePlugin(
     val url: String,
@@ -31,11 +31,12 @@ data class SitePlugin(
     val iconUrl: String? = null,
     val tvTypes: List<String>? = null,
     val fileHash: String? = null,
+    val authors: List<String> = emptyList(),
 )
 
-data class RepoEntry(val name: String, val url: String)
+data class RepoEntry(val name: String, val url: String, val iconUrl: String? = null)
 data class DirectoryRepo(val name: String, val url: String, val verified: Boolean)
-data class InstalledPlugin(val internalName: String, val name: String, val version: Int, val repoUrl: String)
+data class InstalledPlugin(val internalName: String, val name: String, val version: Int, val repoUrl: String, val iconUrl: String? = null)
 data class SavedState(val repos: List<RepoEntry> = emptyList(), val plugins: List<InstalledPlugin> = emptyList())
 
 object Extensions {
@@ -98,7 +99,7 @@ object Extensions {
     suspend fun addRepo(input: String): RepoEntry {
         val url = resolveRepoJson(normalizeRepoUrl(input))
         val repo = parseJson(app.get(url).text, Repository::class)
-        val entry = RepoEntry(repo.name, url)
+        val entry = RepoEntry(repo.name, url, repo.iconUrl)
         save(state.copy(repos = state.repos.filter { it.url != url } + entry))
         return entry
     }
@@ -145,7 +146,7 @@ object Extensions {
         uninstall(plugin.internalName, keepState = true)
         cs3(plugin.internalName).writeBytes(bytes)
         save(state.copy(plugins = state.plugins.filter { it.internalName != plugin.internalName } +
-                InstalledPlugin(plugin.internalName, plugin.name, plugin.version, repoUrl)))
+                InstalledPlugin(plugin.internalName, plugin.name, plugin.version, repoUrl, plugin.iconUrl)))
         load(plugin.internalName)
     }
 

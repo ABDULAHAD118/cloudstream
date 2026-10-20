@@ -44,6 +44,7 @@ object HeaderProxy {
         "http://127.0.0.1:${server.address.port}/$token/$id?u=${URLEncoder.encode(url, Charsets.UTF_8)}"
 
     private val uriAttribute = Regex("URI=\"([^\"]+)\"")
+    private val subtitlesAttribute = Regex(""",SUBTITLES="[^"]*"""")
 
     /**
      * Large files are fetched in byte-range chunks while libVLC sees one continuous response. Some hosts (YouTube
@@ -58,7 +59,7 @@ object HeaderProxy {
         val start = range?.groupValues?.get(1)?.toLong() ?: 0
         val total = range?.groupValues?.get(3)?.toLongOrNull()
         val askedForRange = exchange.requestHeaders.getFirst("Range") != null
-        first.header("Content-Type")?.let { exchange.responseHeaders.add("Content-Type", it) }
+        mediaType(first.header("Content-Type"))?.let { exchange.responseHeaders.add("Content-Type", it) }
         exchange.responseHeaders.add("Accept-Ranges", "bytes")
         if (total == null) { // no total size: just relay this part
             exchange.sendResponseHeaders(206, first.body.contentLength().takeIf { it >= 0 } ?: 0)
@@ -88,6 +89,12 @@ object HeaderProxy {
     /** Segment URL -> its media playlist's segments and its position there, learnt while rewriting playlists. */
     private val segmentOrder = ConcurrentHashMap<String, Pair<List<String>, Int>>()
     private class Segment(val bytes: ByteArray, val type: String?)
+
+    /**
+     * The Content-Type to pass on to libVLC. Some hosts disguise video segments as pictures (image/jpeg, ".jpg"
+     * names); libVLC believes the label and never plays them, so those go without one and libVLC reads the bytes.
+     */
+    private fun mediaType(type: String?) = type?.takeUnless { it.startsWith("image/", ignoreCase = true) }
     private val segments = ConcurrentHashMap<String, CompletableFuture<Segment>>()
     private val fetchPool = Executors.newFixedThreadPool(PREFETCH + 2) { Thread(it, "segment-fetch").apply { isDaemon = true } }
     private val finished = java.util.concurrent.ConcurrentLinkedDeque<Pair<Long, Int>>() // (time, bytes) of recent fetches
@@ -144,8 +151,12 @@ object HeaderProxy {
             val order = body.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.map(::absolute)
             order.forEachIndexed { i, u -> segmentOrder[u] = order to i }
         }
-        return body.lines().joinToString("\n") { line ->
+        // libVLC fetches every subtitle rendition (Netflix-style hosts list ~60) one by one before the first video
+        // segment, which reads as endless buffering. The app draws subtitles itself, from the original playlist
+        // (HlsSubtitles), so libVLC gets the playlist without them.
+        return body.lines().filterNot { it.startsWith("#EXT-X-MEDIA:") && "TYPE=SUBTITLES" in it }.joinToString("\n") { line ->
             when {
+                line.startsWith("#EXT-X-STREAM-INF") -> subtitlesAttribute.replace(line, "")
                 line.isBlank() -> line
                 line.startsWith("#") -> uriAttribute.replace(line) { "URI=\"${wrapUrl(absolute(it.groupValues[1]))}\"" }
                 else -> wrapUrl(absolute(line.trim()))
@@ -161,7 +172,7 @@ object HeaderProxy {
             val head = exchange.requestMethod.equals("HEAD", true)
             if (!head && exchange.requestHeaders.getFirst("Range") == null) {
                 segment(target, headers)?.let { seg ->
-                    seg.type?.let { exchange.responseHeaders.add("Content-Type", it) }
+                    mediaType(seg.type)?.let { exchange.responseHeaders.add("Content-Type", it) }
                     exchange.sendResponseHeaders(200, seg.bytes.size.toLong())
                     exchange.responseBody.use { it.write(seg.bytes) }
                     return
@@ -194,7 +205,8 @@ object HeaderProxy {
                 } else if (!head && response.code == 206) {
                     streamInChunks(exchange, target, headers, response)
                 } else {
-                    listOf("Content-Type", "Content-Range", "Accept-Ranges").forEach { name ->
+                    mediaType(response.header("Content-Type"))?.let { exchange.responseHeaders.add("Content-Type", it) }
+                    listOf("Content-Range", "Accept-Ranges").forEach { name ->
                         response.header(name)?.let { exchange.responseHeaders.add(name, it) }
                     }
                     if (head) {

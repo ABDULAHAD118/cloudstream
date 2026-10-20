@@ -38,8 +38,27 @@ If an extension still fails, the error appears under **Installed**.
   put when you open a title and come back, and the provider is remembered across launches.
 - **Load more** at the end of each Home and Search row fetches the extension's next page, as scrolling does on Android.
   **⟳ Reload** on Home, Search, title pages, Extensions and the player fetches everything again.
-- Netflix-style look: a top bar with tabs and search, a hero banner on Home, poster rows that zoom on hover,
-  title pages with a backdrop, and Material icons throughout.
+- Apple TV-style look: a sidebar (Search, Home, Library, Downloads, Extensions), San Francisco type, a hero carousel
+  of featured titles on Home, an **Up Next** row that resumes where you stopped, and poster shelves that lift on hover.
+- Title pages show the backdrop or logo, facts, the IMDb rating and Metascore, episode cards with watch progress,
+  cast, More Like This, IMDb ratings breakdown and reviews, and an Information section (IMDb's unofficial API, cached 3 days).
+- **Library**: bookmark titles as Watching, Plan to watch, Completed, On hold or Dropped, plus watch history (`library.json`).
+- The display stays awake while a video plays (`caffeinate`), and can sleep again when it's paused.
+- Hindi audio plays by default whenever a video has it: a Hindi track inside the stream (HLS language groups,
+  MKV) is picked a moment after it starts, and YouTube's Hindi dub is picked from the extension's audio files.
+  Choosing another language under Audio still works.
+- Downloads keep only Hindi and English audio (all languages when neither is there) and one English subtitle file (plain English over CC),
+  including the ones inside HLS streams, saved as .srt.
+- Downloads of titles with separate language tracks put Hindi first, so other players start in Hindi too, and the
+  app's player shows each track's language name (the merged file itself only says Track 1, Track 2). Files deleted in
+  Finder drop off the Downloads list.
+- Hovering the seek bar shows the frame at that spot, from a second silent libVLC player that only opens the
+  stream on the first hover. The player's highlights follow the accent colour from Settings.
+- **Extensions** looks like the reference app: repository cards with icons and extension counts, a page per
+  repository with each extension's icon, version, type and author, one search across every repository, the
+  installed list with icons and load status, and **Update all**.
+- **Settings**: theme and accent color, autoplay next episode, preferred quality, subtitle size, download folder,
+  downloads at the same time, connections per download, open the data folder, clear watch history.
 - Built-in player (libVLC, bundled in the DMG). Its main bar has play/pause, ±10 s, a Netflix-style seek bar
   (hover for a time preview) and a pop-up volume bar. Everything else is in **⋮** and on **right-click**: speed,
   quality, source, audio, skip intro, reload, download, open in IINA/VLC. It has play/pause, a seek bar, ±10 s, Skip OP (+85 s, like Android),
@@ -67,14 +86,14 @@ If an extension still fails, the error appears under **Installed**.
   in parallel (byte ranges, or HLS segments via the library's `M3u8Helper2` as on Android), so it's not limited
   to playback speed. A separate audio track (YouTube) is merged into one MKV locally, and DASH goes through libVLC.
   HLS titles whose audio is a separate group (one track per language) download every language into one MKV.
-  Dropped connections are retried. The **Downloads** tab shows progress, with Cancel, Retry, Delete, Show in Finder, and ▶ Play offline in the
+  Dropped connections are retried. Paused downloads, and ones running when the app quits, carry on from where
+  they stopped (files by byte range, HLS by segment); an expired link is swapped for a fresh one of the same quality. The **Downloads** tab shows progress, with Pause, Resume, Cancel, Retry, Delete, Show in Finder, and ▶ Play offline in the
   built-in player.
 
 ## What's missing (compared with Android)
 
 - Player extras: AniSkip intro/outro timestamps, subtitle styling and sync offset, Picture-in-Picture, DASH streams that need headers.
-- Pausing and resuming a download (Retry restarts it), and download notifications.
-- Library and bookmarks, watch history, and the continue-watching row (resume positions are saved, though).
+- Download notifications.
 - HLS playlists with tags between `#EXTINF` and the segment URI aren't fully read by the library's parser;
   downloads then fall back to libVLC, which may stop early on them too. Standard playlists are fine.
 - Account sync (AniList, MAL, Simkl, Trakt), subtitle search providers, backup and restore.
@@ -82,7 +101,7 @@ If an extension still fails, the error appears under **Installed**.
 - Extension settings screens (they're Android views and do nothing here; defaults apply), plus extensions that need WebView or Cloudflare bypass
   (`WebViewResolver` is a no-op on the JVM) or other un-stubbed Android APIs.
 - Short-code repository links (cutt.ly and py.md). Paste the full URL instead.
-- Translations, the app's settings, and the in-app updater. Updates come from GitHub releases.
+- Translations and the in-app updater. Updates come from GitHub releases.
 
 ## Develop
 
@@ -104,4 +123,5 @@ network tests. They use the official repo and drive every screen through the rea
 profile: repositories, installing and removing extensions, home, search, a movie, and a series in the player
 (play/pause, seek, speed, next episode). They save screenshots to `macApp/build/ui-shots`. Set `CS_VLC_LOG=1`
 to print libVLC's warnings and errors and the player's source switching, and `CS_PROXY_LOG=1` to print each
-request libVLC makes through the proxy.
+request libVLC makes through the proxy. Requests stopped on purpose (leaving a page mid-load, closing the download picker) aren't
+logged; `CS_HTTP_LOG=1` shows them again.
