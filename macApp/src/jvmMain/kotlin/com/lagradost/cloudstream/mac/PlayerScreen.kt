@@ -113,11 +113,18 @@ fun canSeek(link: ExtractorLink): Boolean {
 }
 
 /**
+ * False for DASH that needs headers beyond Referer and User-Agent (MovieBox's X-MB-Token): DASH skips the proxy
+ * (see [playbackUrl]) and libVLC can't send them, so the host answers 403.
+ */
+fun canPlay(link: ExtractorLink): Boolean =
+    link.type != ExtractorLinkType.DASH || link.headers.keys.all { it.equals("Referer", true) || it.equals("User-Agent", true) }
+
+/**
  * Best first up to [maxQuality], like Android, preferring sources that can seek (resume and skipping need it);
- * sources above the cap follow, lowest first, still pickable under Source.
+ * sources above the cap follow, lowest first, still pickable under Source. Sources libVLC can't open go last.
  */
 fun sortLinks(links: List<ExtractorLink>, maxQuality: Int = QualityPreference.max) = links.distinctBy { it.url }.sortedWith(
-    compareBy<ExtractorLink> { it.quality > maxQuality }.thenBy { !canSeek(it) }
+    compareBy<ExtractorLink> { !canPlay(it) }.thenBy { it.quality > maxQuality }.thenBy { !canSeek(it) }
         .thenBy { if (it.quality > maxQuality) it.quality else -it.quality }
 )
 
@@ -127,7 +134,8 @@ fun sortLinks(links: List<ExtractorLink>, maxQuality: Int = QualityPreference.ma
  */
 @Composable
 fun KeepScreenAwake(active: Boolean) = DisposableEffect(active) {
-    val caffeinate = if (active) runCatching {
+    // shortcut: macOS only; on Windows the display can sleep mid-video, add SetThreadExecutionState if that bites
+    val caffeinate = if (active && !isWindows) runCatching {
         ProcessBuilder("/usr/bin/caffeinate", "-d", "-i", "-w", ProcessHandle.current().pid().toString()).start()
     }.getOrNull() else null
     onDispose { caffeinate?.destroy() }
@@ -534,7 +542,6 @@ fun playbackUrl(url: String, type: ExtractorLinkType, headers: Map<String, Strin
 
 /** One subtitle choice; [load] fetches and parses it when picked. */
 class SubtitleOption(val key: String, val label: String, val load: suspend () -> List<Cue>)
-
 /** Subtitle size and language, remembered like Android's subtitle settings. */
 object SubtitlePreference {
     private val prefs get() = Preferences.named("cloudstream_mac")

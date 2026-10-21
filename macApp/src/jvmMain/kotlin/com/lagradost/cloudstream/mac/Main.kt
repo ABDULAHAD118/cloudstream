@@ -115,6 +115,7 @@ private fun app() = application {
     LaunchedEffect(Unit) {
         // Warm up the player engine now, so the first Play doesn't wait for libVLC to start
         AppScope.launch { VideoEngine.shared() }
+        if (AppSettings.autoUpdate) AppScope.launch { Updater.check() }
         withContext(Dispatchers.IO) {
             Extensions.loadAll()
             APIHolder.initAll()
@@ -140,6 +141,15 @@ fun App(start: List<Screen> = listOf(Home)) {
         AppContent(stack)
         Toasts.current?.let {
             Snackbar(Modifier.align(Alignment.BottomCenter).padding(24.dp), containerColor = Color(0xFF2F2F2F), contentColor = Color.White) { Text(it) }
+        }
+        // Stays until used or dismissed; it never restarts on its own, so it can't cut off a video
+        var updateDismissed by remember { mutableStateOf(false) }
+        Updater.ready?.takeIf { !updateDismissed && Toasts.current == null }?.let { update ->
+            Snackbar(
+                Modifier.align(Alignment.BottomCenter).padding(24.dp), containerColor = Color(0xFF2F2F2F), contentColor = Color.White,
+                action = { TextButton(onClick = { Updater.installAndRestart() }, modifier = Modifier.handCursor()) { Text("Restart to update") } },
+                dismissAction = { TextButton(onClick = { updateDismissed = true }, modifier = Modifier.handCursor()) { Text("Later") } },
+            ) { Text("CloudStream ${update.version} is ready") }
         }
     }
 }

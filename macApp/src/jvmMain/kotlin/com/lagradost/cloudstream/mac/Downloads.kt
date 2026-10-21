@@ -15,6 +15,9 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import okhttp3.Request
 import uk.co.caprica.vlcj.factory.MediaPlayerFactory
+import uk.co.caprica.vlcj.media.Media
+import uk.co.caprica.vlcj.media.MediaEventAdapter
+import uk.co.caprica.vlcj.media.MediaParsedStatus
 import uk.co.caprica.vlcj.player.base.MediaPlayer
 import uk.co.caprica.vlcj.player.base.MediaPlayerEventAdapter
 import java.io.File
@@ -64,7 +67,7 @@ data class Download(
  * (DASH, and HLS playlists the library can't read) start over.
  */
 object Downloads {
-    val folder get() = File(System.getProperty("cloudstream.downloadDir") ?: AppSettings.downloadFolder ?: "${System.getProperty("user.home")}/Movies/CloudStream")
+    val folder get() = File(System.getProperty("cloudstream.downloadDir") ?: AppSettings.downloadFolder ?: "${System.getProperty("user.home")}/$videosFolderName/CloudStream")
     private val listFile = File(Extensions.dataDir, "downloads.json")
     private const val CHUNK = 8L * 1024 * 1024
 
@@ -142,6 +145,41 @@ object Downloads {
         if (saved.isNotEmpty()) update(download.id) { it.copy(subtitles = saved) }
     }
 
+    /**
+     * A finished video that already carries English subtitles (MovieBox's MP4s have several) doesn't need the .srt
+     * beside it: other players show the file's own track. The in-app player can't (libVLC doesn't draw subtitles
+     * into the frames it hands the app), so the .srt moves into the app's data folder for it.
+     */
+    private suspend fun hideRedundantSubtitles(id: String) = withContext(Dispatchers.IO) {
+        val download = items.firstOrNull { it.id == id && it.status == DownloadStatus.Done } ?: return@withContext
+        val beside = download.subtitles.filter { File(it).parentFile == File(download.file).parentFile }
+        if (beside.isEmpty()) return@withContext
+        if (runCatching { embeddedSubtitleLanguages(download.file) }.getOrDefault(emptyList()).none(::isEnglish)) return@withContext
+        // Same file name in a folder of its own: the player labels a subtitle by its name after the video's
+        val dir = File(Extensions.dataDir, "subtitles/${download.id}").apply { mkdirs() }
+        val moved = download.subtitles.associateWith { path ->
+            if (path !in beside) path else File(dir, File(path).name).let { if (File(path).renameTo(it)) it.path else path }
+        }
+        update(id) { it.copy(subtitles = it.subtitles.map { p -> moved[p] ?: p }) }
+    }
+
+    /** The languages of the subtitle tracks inside a local video, read by libVLC without playing it. */
+    suspend fun embeddedSubtitleLanguages(path: String): List<String> {
+        if (VideoEngine.loadError != null || !File(path).exists()) return emptyList() // loadError finds libVLC first
+        val media = vlc.media().newMedia(path) ?: return emptyList()
+        try {
+            val parsed = CompletableDeferred<Unit>()
+            media.events().addMediaEventListener(object : MediaEventAdapter() {
+                override fun mediaParsedChanged(media: Media, newStatus: MediaParsedStatus) { parsed.complete(Unit) }
+            })
+            if (!media.parsing().parse()) return emptyList()
+            withTimeoutOrNull(30_000) { parsed.await() } ?: return emptyList()
+            return media.info().textTracks().map { it.language() ?: it.description() ?: "" }
+        } finally {
+            media.release()
+        }
+    }
+
     /** Starts it again, from where it stopped when its data is still there. */
     fun retry(id: String) {
         update(id) { it.copy(status = DownloadStatus.Queued, error = null) }
@@ -214,6 +252,8 @@ object Downloads {
             if (ok) it.copy(status = DownloadStatus.Done, progress = 1f)
             else it.copy(status = DownloadStatus.Failed, error = error ?: "Nothing was downloaded")
         }
+        // shortcut: an .srt still being fetched when the video finishes stays beside it until the next launch
+        if (ok) AppScope.launch { hideRedundantSubtitles(id) }
         startNext()
     }
 
@@ -452,7 +492,7 @@ object Downloads {
     }
 
     // Placed last, so everything above is set up before the downloads interrupted by quitting start again
-    init { AppScope.launch { startNext() } }
+    init { AppScope.launch { startNext(); items.toList().forEach { hideRedundantSubtitles(it.id) } } }
 }
 
 /**

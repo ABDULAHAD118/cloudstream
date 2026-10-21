@@ -1,0 +1,129 @@
+name: Desktop build
+
+# Fork-only, and the only build this fork runs (the upstream Android workflows were removed).
+# Every push to master that touches the desktop app (or the code it reuses) builds the Mac app for Intel and
+# Apple Silicon and the Windows app, and publishes them in one GitHub release.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "macApp/**"
+      - "library/**"
+      - "shared/**"
+      - "gradle/**"
+      - "settings.gradle.kts"
+      - ".github/workflows/desktop-release.yml"
+  # Pull requests build and test everything too, but publish nothing
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-build-${{ github.event_name == 'pull_request' && github.head_ref || 'release' }}
+  cancel-in-progress: true
+
+jobs:
+  # Releases count up from 1.0.1: the next number after the newest vX.Y.N release
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - id: next
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          last="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' \
+            | sed -n 's/^v1\.0\.\([0-9]\+\)$/\1/p' | sort -n | tail -1)"
+          echo "version=1.0.$(( ${last:-0} + 1 ))" >> "$GITHUB_OUTPUT"
+
+  mac:
+    needs: version
+    # jpackage bundles the JRE of the machine it runs on, so each architecture needs its own runner
+    strategy:
+      matrix:
+        include:
+          - { runner: macos-15-intel, label: intel }
+          - { runner: macos-15, label: apple-silicon }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Test
+        run: ./gradlew :macApp:jvmTest
+
+      # Same script as a local build: bundles libVLC, checks the architecture, signs ad-hoc, makes the DMG
+      - name: Build DMG
+        run: macApp/build-dmg.sh "${{ needs.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-mac-${{ matrix.label }}
+          path: macApp/build/CloudStream-*.dmg
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Bundles libVLC and zips the app folder; the tests already ran on the Mac runners
+      - name: Build zip
+        run: macApp/build-windows.sh "${{ needs.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-windows
+          path: macApp/build/CloudStream-*.zip
+
+  release:
+    needs: [version, mac, windows]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: app-*
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" *.dmg *.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "CloudStream $VERSION" \
+            --notes "CloudStream $VERSION for Mac and Windows, built from ${GITHUB_SHA::7}.
+
+          - **Mac:** download **-intel.dmg** for Intel Macs or **-apple-silicon.dmg** for M-series Macs, then drag CloudStream to Applications. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway.
+          - **Windows (64-bit):** download **-windows.zip**, unzip it anywhere and run CloudStream.exe. Not signed: if SmartScreen warns, choose More info → Run anyway.
+
+          Videos play in the built-in player. See macApp/README.md for what works."

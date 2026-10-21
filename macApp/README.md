@@ -1,18 +1,27 @@
-# CloudStream for Mac (fork-only)
+# CloudStream for Mac and Windows (fork-only)
 
-A small Compose Desktop app that runs CloudStream's Android extensions on macOS. It reuses upstream's
-`library` module (MainAPI, extractors, plugin API) and the `shared` theme. Everything Mac-specific lives
+A small Compose Desktop app that runs CloudStream's Android extensions on macOS and Windows. It reuses upstream's
+`library` module (MainAPI, extractors, plugin API) and the `shared` theme. Everything desktop-specific lives
 in this module, so the daily upstream sync stays conflict-free. It's separate from upstream's `desktopApp`,
-which is still a placeholder.
+which is still a placeholder. This fork builds only this app: the upstream Android (APK) workflows were removed.
 
 ## Install
 
-1. From the latest **Mac build** release, download `-intel.dmg` for an Intel Mac or `-apple-silicon.dmg` for an M-series Mac, then drag CloudStream to Applications.
-2. The first launch is blocked because the app isn't notarized. Go to System Settings → Privacy & Security → **Open Anyway**.
-3. Open **Extensions**. The official repo is already added. Add more from **Community repositories** (the directory
-   the Android setup screen links to), or paste a link: a `repo.json` URL, a GitHub project URL, or a `cloudstreamrepo://` link.
+From the latest **CloudStream 1.0.x** release:
 
-App data (repos, installed extensions, converted jars) lives in `~/Library/Application Support/CloudStream`.
+- **Mac:** download `-intel.dmg` for an Intel Mac or `-apple-silicon.dmg` for an M-series Mac, then drag CloudStream
+  to Applications. The first launch is blocked because the app isn't notarized: go to System Settings → Privacy & Security → **Open Anyway**.
+- **Windows (64-bit):** download `-windows.zip`, unzip it anywhere and run `CloudStream.exe`. It isn't signed, so if
+  SmartScreen warns, choose **More info → Run anyway**.
+
+Then open **Extensions**. The official repo is already added. Add more from **Community repositories** (the directory
+the Android setup screen links to), or paste a link: a `repo.json` URL, a GitHub project URL, or a `cloudstreamrepo://` link.
+
+App data (repos, installed extensions, converted jars) lives in `~/Library/Application Support/CloudStream` on Mac
+and `%APPDATA%\CloudStream` on Windows. Downloads go to `Movies/CloudStream` (Mac) or `Videos\CloudStream` (Windows).
+
+Builds: `macApp/build-dmg.sh` (on a Mac) and `macApp/build-windows.sh` (Git Bash on Windows) make the same files CI
+publishes from `.github/workflows/desktop-release.yml`.
 
 ## How extensions run
 
@@ -48,7 +57,8 @@ If an extension still fails, the error appears under **Installed**.
   MKV) is picked a moment after it starts, and YouTube's Hindi dub is picked from the extension's audio files.
   Choosing another language under Audio still works.
 - Downloads keep only Hindi and English audio (all languages when neither is there) and one English subtitle file (plain English over CC),
-  including the ones inside HLS streams, saved as .srt.
+  including the ones inside HLS streams, saved as .srt. When the video already has English subtitles inside (MovieBox's MP4s),
+  the .srt goes to the app's data folder instead, so the download folder holds just the video.
 - Downloads of titles with separate language tracks put Hindi first, so other players start in Hindi too, and the
   app's player shows each track's language name (the merged file itself only says Track 1, Track 2). Files deleted in
   Finder drop off the Downloads list.

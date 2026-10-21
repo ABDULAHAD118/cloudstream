@@ -10,6 +10,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -36,6 +37,8 @@ object AppSettings {
     var primaryColor by pref({ runCatching { CloudStreamPrimaryColor.valueOf(prefs.getString("accent", null)!!) }.getOrDefault(CloudStreamPrimaryColor.NORMAL) },
         { prefs.edit().putString("accent", it.name).apply() })
     var autoPlayNext by pref({ prefs.getBoolean("autoplay_next", true) }, { prefs.edit().putBoolean("autoplay_next", it).apply() })
+    /** Look for a new release on every launch and download it in the background. */
+    var autoUpdate by pref({ prefs.getBoolean("auto_update", true) }, { prefs.edit().putBoolean("auto_update", it).apply() })
     /** Null means ~/Movies/CloudStream. */
     var downloadFolder by pref({ prefs.getString("download_folder", null) }, { prefs.edit().putString("download_folder", it).apply() })
     var parallelDownloads by pref({ prefs.getInt("parallel_downloads", 2) }, { prefs.edit().putInt("parallel_downloads", it).apply() })
@@ -96,7 +99,7 @@ fun SettingsScreen() {
             Text(Downloads.folder.path.replace(System.getProperty("user.home"), "~"), style = MaterialTheme.typography.bodyMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 8.dp)) {
                 OutlinedButton(onClick = { chooseFolder()?.let { AppSettings.downloadFolder = it } }, modifier = Modifier.handCursor()) { Text("Change folder") }
-                if (AppSettings.downloadFolder != null) OutlinedButton(onClick = { AppSettings.downloadFolder = null }, modifier = Modifier.handCursor()) { Text("Use Movies folder") }
+                if (AppSettings.downloadFolder != null) OutlinedButton(onClick = { AppSettings.downloadFolder = null }, modifier = Modifier.handCursor()) { Text("Use $videosFolderName folder") }
             }
             Hint("Finished downloads stay where they are when you change the folder.")
             Label("Downloads at the same time")
@@ -122,7 +125,23 @@ fun SettingsScreen() {
             Hint(Extensions.dataDir.absolutePath)
 
             Section("About")
-            Text("CloudStream for Mac, built on CloudStream's cross-platform library. Extensions are third-party and CloudStream " +
+            // jpackage's launcher sets the version the build was made with; `run` from Gradle has none
+            Text("CloudStream ${System.getProperty("jpackage.app-version") ?: "(development build)"}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("Made by Abdul Ahad", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(bottom = 4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (Updater.ready != null) Button(onClick = { Updater.installAndRestart() }, modifier = Modifier.handCursor()) { Text("Restart to update") }
+                else OutlinedButton(onClick = { AppScope.launch { Updater.check() } }, modifier = Modifier.handCursor()) { Text("Check for updates") }
+                Updater.status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+            Toggle("Check for updates automatically", AppSettings.autoUpdate) { AppSettings.autoUpdate = it }
+            Hint("On launch, a new version downloads in the background; nothing installs until you choose Restart to update.")
+            Spacer(Modifier.size(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = { runCatching { Desktop.getDesktop().browse(java.net.URI("https://github.com/ABDULAHAD118")) } }, modifier = Modifier.handCursor()) { Text("GitHub: ABDULAHAD118") }
+                OutlinedButton(onClick = { runCatching { Desktop.getDesktop().browse(java.net.URI("https://github.com/ABDULAHAD118/cloudstream/releases")) } }, modifier = Modifier.handCursor()) { Text("Releases") }
+            }
+            Spacer(Modifier.size(8.dp))
+            Text("CloudStream for Mac and Windows, built on CloudStream's cross-platform library. Extensions are third-party and CloudStream " +
                 "does not host any content. Licensed under GPL-3.0.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Hint("Java ${System.getProperty("java.version")} · ${System.getProperty("os.name")} ${System.getProperty("os.arch")} · " +
                 "external player: ${Player.available ?: "none"}")
@@ -154,6 +173,12 @@ private fun Toggle(text: String, checked: Boolean, onChange: (Boolean) -> Unit) 
 
 /** The native macOS folder picker. Returns null when cancelled. */
 private fun chooseFolder(): String? {
+    // Windows' native file dialog can't pick folders; Swing's chooser can
+    if (isWindows) return javax.swing.JFileChooser(Downloads.folder).run {
+        fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
+        dialogTitle = "Choose a download folder"
+        if (showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) selectedFile.path else null
+    }
     System.setProperty("apple.awt.fileDialogForDirectories", "true")
     return try {
         val dialog = java.awt.FileDialog(null as java.awt.Frame?, "Choose a download folder", java.awt.FileDialog.LOAD)
