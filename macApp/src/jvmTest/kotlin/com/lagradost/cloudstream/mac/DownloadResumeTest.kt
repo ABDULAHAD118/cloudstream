@@ -40,7 +40,9 @@ class DownloadResumeTest {
                 (listOf("#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:0") +
                     segments.indices.flatMap { listOf("#EXTINF:2.0,", "seg$it.ts") } + "#EXT-X-ENDLIST").joinToString("\n").toByteArray()
             } else {
-                Thread.sleep(60)
+                // Segments are written 24 at a time, so progress leaps to 0.8 and stays there only while the last
+                // few download; slow enough that the 50 ms poll can't miss it (at 60 ms it flaked on CI)
+                Thread.sleep(250)
                 segments[name.removePrefix("seg").removeSuffix(".ts").toInt()].also { served.addAndGet(it.size.toLong()) }
             }
             ex.sendResponseHeaders(200, body.size.toLong())
