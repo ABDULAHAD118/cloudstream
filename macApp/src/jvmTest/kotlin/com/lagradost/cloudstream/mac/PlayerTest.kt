@@ -58,6 +58,21 @@ class PlayerTest {
     }
 
     @Test
+    fun dashNeedingExtraHeadersComesLast() = runBlocking {
+        // MovieBox: its DASH needs X-MB-Token, which libVLC can't send, so its MP4s play first
+        val tokenDash = newExtractorLink("MovieBox", "token DASH", "https://x/a.mpd", ExtractorLinkType.DASH) {
+            quality = 1080; referer = "https://site/"; headers = mapOf("Origin" to "https://site", "X-MB-Token" to "t")
+        }
+        val plainDash = newExtractorLink("Site", "plain DASH", "https://x/b.mpd", ExtractorLinkType.DASH) {
+            quality = 720; headers = mapOf("referer" to "https://site/", "User-Agent" to "ua")
+        }
+        val mp4 = newExtractorLink("MovieBox", "MP4", "https://x/c.mp4", ExtractorLinkType.VIDEO) {
+            quality = 480; headers = mapOf("X-MB-Token" to "t") // the proxy sends these
+        }
+        assertEquals(listOf("plain DASH", "MP4", "token DASH"), sortLinks(listOf(tokenDash, plainDash, mp4), QualityPreference.AUTO).map { it.name })
+    }
+
+    @Test
     fun youtubeStartsWithBestAudioOthersWithFirst() {
         val yt = listOf("https://x/videoplayback?itag=139&mime=audio%2Fmp4", "https://x/videoplayback?itag=140&mime=audio%2Fmp4", "https://x/v?itag=251&mime=audio%2Fwebm")
         assertEquals(2, defaultAudio(yt))
