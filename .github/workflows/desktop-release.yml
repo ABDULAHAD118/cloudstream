@@ -107,10 +107,17 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
+      # Full history, for the changelog since the previous release
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - uses: actions/download-artifact@v4
         with:
           pattern: app-*
           merge-multiple: true
+          path: dist
 
       - name: Publish release
         env:
@@ -118,12 +125,25 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          gh release create "v$VERSION" *.dmg *.zip \
+          # What's new: the commits since the previous release (merge commits left out; their commits are listed)
+          prev="$(git tag --list 'v1.0.*' --sort=-v:refname | grep -vx "v$VERSION" | head -1 || true)"
+          if [ -n "$prev" ]; then
+            changes="$(git log --no-merges --format='- %s' "$prev..$GITHUB_SHA" | head -40)"
+          else
+            changes="- First release of CloudStream for Mac and Windows"
+          fi
+          cat > notes.md <<NOTES
+          ## What's new
+          ${changes:-- Maintenance build}
+
+          ## Download
+          - **Mac:** \`-apple-silicon.dmg\` for M-series Macs, \`-intel.dmg\` for Intel Macs. Open it and drag CloudStream to Applications. The first launch is blocked because the app isn't notarized: allow it in System Settings → Privacy & Security → Open Anyway.
+          - **Windows (64-bit):** \`-windows.zip\`. Unzip it anywhere and run CloudStream.exe. If SmartScreen warns, choose More info → Run anyway.
+
+          Already installed? CloudStream updates itself: Settings → About → Check for updates.
+          ${prev:+
+          **Full changelog:** https://github.com/$GITHUB_REPOSITORY/compare/$prev...v$VERSION}
+          NOTES
+          gh release create "v$VERSION" dist/*.dmg dist/*.zip \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "CloudStream $VERSION" \
-            --notes "CloudStream $VERSION for Mac and Windows, built from ${GITHUB_SHA::7}.
-
-          - **Mac:** download **-intel.dmg** for Intel Macs or **-apple-silicon.dmg** for M-series Macs, then drag CloudStream to Applications. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway.
-          - **Windows (64-bit):** download **-windows.zip**, unzip it anywhere and run CloudStream.exe. Not signed: if SmartScreen warns, choose More info → Run anyway.
-
-          Videos play in the built-in player. See macApp/README.md for what works."
+            --title "CloudStream $VERSION" --notes-file notes.md
