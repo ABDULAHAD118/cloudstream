@@ -6,12 +6,17 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lagradost.cloudstream4.theme.CloudStreamPrimaryColor
@@ -125,27 +130,63 @@ fun SettingsScreen() {
             Hint(Extensions.dataDir.absolutePath)
 
             Section("About")
-            // jpackage's launcher sets the version the build was made with; `run` from Gradle has none
-            Text("CloudStream ${System.getProperty("jpackage.app-version") ?: "(development build)"}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text("Made by Abdul Ahad", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(bottom = 4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (Updater.ready != null) Button(onClick = { Updater.installAndRestart() }, modifier = Modifier.handCursor()) { Text("Restart to update") }
-                else OutlinedButton(onClick = { AppScope.launch { Updater.check() } }, modifier = Modifier.handCursor()) { Text("Check for updates") }
-                Updater.status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            }
-            Toggle("Check for updates automatically", AppSettings.autoUpdate) { AppSettings.autoUpdate = it }
-            Hint("On launch, a new version downloads in the background; nothing installs until you choose Restart to update.")
-            Spacer(Modifier.size(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(onClick = { runCatching { Desktop.getDesktop().browse(java.net.URI("https://github.com/ABDULAHAD118")) } }, modifier = Modifier.handCursor()) { Text("GitHub: ABDULAHAD118") }
-                OutlinedButton(onClick = { runCatching { Desktop.getDesktop().browse(java.net.URI("https://github.com/ABDULAHAD118/cloudstream/releases")) } }, modifier = Modifier.handCursor()) { Text("Releases") }
-            }
-            Spacer(Modifier.size(8.dp))
-            Text("CloudStream for Mac and Windows, built on CloudStream's cross-platform library. Extensions are third-party and CloudStream " +
-                "does not host any content. Licensed under GPL-3.0.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Hint("Java ${System.getProperty("java.version")} · ${System.getProperty("os.name")} ${System.getProperty("os.arch")} · " +
-                "external player: ${Player.available ?: "none"}")
+            AboutCard()
+            Spacer(Modifier.size(12.dp))
+            UpdateCard()
         }
+    }
+}
+
+@Composable
+private fun Card(content: @Composable ColumnScope.() -> Unit) =
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(20.dp), content = content)
+    }
+
+@Composable
+private fun AboutCard() = Card {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        // The sidebar's logo, so it follows the accent colour picked above
+        Box(Modifier.size(64.dp).background(Color.Black, CircleShape), contentAlignment = Alignment.Center) {
+            Icon(Icons.Filled.Cloud, "CloudStream", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(38.dp))
+        }
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text("CloudStream", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            // jpackage's launcher sets the version the build was made with; `run` from Gradle has none
+            Text("Version ${Updater.currentVersion ?: "(development build)"}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Made by Abdul Ahad", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        LinkButton("GitHub", "https://github.com/ABDULAHAD118")
+        LinkButton("Releases", "https://github.com/ABDULAHAD118/cloudstream/releases")
+    }
+}
+
+@Composable
+private fun LinkButton(text: String, url: String) =
+    TextButton(onClick = { runCatching { Desktop.getDesktop().browse(java.net.URI(url)) } }, modifier = Modifier.handCursor()) {
+        Text(text); Spacer(Modifier.width(4.dp)); Icon(Icons.AutoMirrored.Filled.OpenInNew, null, Modifier.size(16.dp))
+    }
+
+@Composable
+private fun UpdateCard() = Card {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Software update", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(Updater.status ?: "Not checked yet", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (Updater.ready != null) Button(onClick = { Updater.installAndRestart() }, modifier = Modifier.handCursor()) { Text("Restart to update") }
+        else OutlinedButton(onClick = { AppScope.launch { Updater.check() } }, modifier = Modifier.handCursor()) { Text("Check for updates") }
+    }
+    HorizontalDivider(Modifier.padding(vertical = 14.dp))
+    Row(Modifier.fillMaxWidth().handCursor().clickable { AppSettings.autoUpdate = !AppSettings.autoUpdate }, verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Check for updates automatically")
+            Text("New versions download in the background; nothing installs until you choose Restart to update.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(16.dp))
+        Switch(checked = AppSettings.autoUpdate, onCheckedChange = { AppSettings.autoUpdate = it }, modifier = Modifier.handCursor())
     }
 }
 
