@@ -3,7 +3,7 @@
 A small Compose Desktop app that runs CloudStream's Android extensions on macOS and Windows. It reuses upstream's
 `library` module (MainAPI, extractors, plugin API) and the `shared` theme. Everything desktop-specific lives
 in this module, so the daily upstream sync stays conflict-free. It's separate from upstream's `desktopApp`,
-which is still a placeholder. This fork builds only this app: the upstream Android (APK) workflows are disabled.
+which is still a placeholder. This fork builds only this app: the upstream Android (APK) workflows were removed.
 
 ## Install
 

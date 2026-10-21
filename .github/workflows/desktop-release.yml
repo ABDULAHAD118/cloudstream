@@ -1,6 +1,6 @@
 name: Desktop build
 
-# Fork-only, and the only build this fork runs (the upstream Android workflows are disabled in the repo settings).
+# Fork-only, and the only build this fork runs (the upstream Android workflows were removed).
 # Every push to master that touches the desktop app (or the code it reuses) builds the Mac app for Intel and
 # Apple Silicon and the Windows app, and publishes them in one GitHub release.
 on:
