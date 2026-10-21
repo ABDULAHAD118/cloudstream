@@ -72,5 +72,5 @@ jobs:
           tag="mac-build-${GITHUB_RUN_NUMBER}"
           gh release create "$tag" *.dmg \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Mac build $GITHUB_RUN_NUMBER" \
-            --notes "Mac build of ${GITHUB_SHA::7}. Download **-intel.dmg** for Intel Macs or **-apple-silicon.dmg** for M-series Macs. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway. Videos play in the built-in player. See macApp/README.md for what works."
+            --title "CloudStream 1.0.${GITHUB_RUN_NUMBER}" \
+            --notes "CloudStream 1.0.${GITHUB_RUN_NUMBER} for Mac, built from ${GITHUB_SHA::7}. Download **-intel.dmg** for Intel Macs or **-apple-silicon.dmg** for M-series Macs. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway. Videos play in the built-in player. See macApp/README.md for what works."

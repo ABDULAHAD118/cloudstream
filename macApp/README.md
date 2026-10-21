@@ -7,7 +7,7 @@ which is still a placeholder.
 
 ## Install
 
-1. From the latest **Mac build** release, download `-intel.dmg` for an Intel Mac or `-apple-silicon.dmg` for an M-series Mac, then drag CloudStream to Applications.
+1. From the latest **CloudStream 1.0.x** release, download `-intel.dmg` for an Intel Mac or `-apple-silicon.dmg` for an M-series Mac, then drag CloudStream to Applications.
 2. The first launch is blocked because the app isn't notarized. Go to System Settings → Privacy & Security → **Open Anyway**.
 3. Open **Extensions**. The official repo is already added. Add more from **Community repositories** (the directory
    the Android setup screen links to), or paste a link: a `repo.json` URL, a GitHub project URL, or a `cloudstreamrepo://` link.
