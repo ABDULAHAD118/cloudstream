@@ -67,7 +67,7 @@ data class Download(
  * (DASH, and HLS playlists the library can't read) start over.
  */
 object Downloads {
-    val folder get() = File(System.getProperty("cloudstream.downloadDir") ?: AppSettings.downloadFolder ?: "${System.getProperty("user.home")}/Movies/CloudStream")
+    val folder get() = File(System.getProperty("cloudstream.downloadDir") ?: AppSettings.downloadFolder ?: "${System.getProperty("user.home")}/$videosFolderName/CloudStream")
     private val listFile = File(Extensions.dataDir, "downloads.json")
     private const val CHUNK = 8L * 1024 * 1024
 

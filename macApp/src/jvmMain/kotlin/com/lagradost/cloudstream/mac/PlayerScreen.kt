@@ -134,7 +134,8 @@ fun sortLinks(links: List<ExtractorLink>, maxQuality: Int = QualityPreference.ma
  */
 @Composable
 fun KeepScreenAwake(active: Boolean) = DisposableEffect(active) {
-    val caffeinate = if (active) runCatching {
+    // shortcut: macOS only; on Windows the display can sleep mid-video, add SetThreadExecutionState if that bites
+    val caffeinate = if (active && !isWindows) runCatching {
         ProcessBuilder("/usr/bin/caffeinate", "-d", "-i", "-w", ProcessHandle.current().pid().toString()).start()
     }.getOrNull() else null
     onDispose { caffeinate?.destroy() }

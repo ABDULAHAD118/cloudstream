@@ -46,7 +46,7 @@ object Extensions {
     }
 
     // The property lets tests use a throwaway folder instead of the real app data
-    val dataDir = File(System.getProperty("cloudstream.dataDir") ?: "${System.getProperty("user.home")}/Library/Application Support/CloudStream")
+    val dataDir = File(System.getProperty("cloudstream.dataDir") ?: defaultDataDir)
         .apply { mkdirs() }
     private val pluginDir = File(dataDir, "plugins").apply { mkdirs() }
     private val stateFile = File(dataDir, "state.json")

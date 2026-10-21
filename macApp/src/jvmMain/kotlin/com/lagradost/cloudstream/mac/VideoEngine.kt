@@ -24,7 +24,8 @@ class VideoEngine : AutoCloseable {
     companion object {
         /** Null when libVLC was found, otherwise a message for the user. */
         val loadError: String? by lazy {
-            // The DMG bundles libVLC under resources/vlc; `run` from Gradle falls back to an installed VLC.app
+            // The DMG and the Windows build bundle libVLC under resources/vlc/lib (on Windows its plugins sit inside lib,
+            // where libvlccore.dll looks for them); `run` from Gradle falls back to an installed VLC
             System.getProperty("compose.application.resources.dir")?.let { File(it, "vlc/lib") }
                 ?.takeIf { it.isDirectory }?.let { System.setProperty("jna.library.path", it.path) }
             if (NativeDiscovery().discover()) null

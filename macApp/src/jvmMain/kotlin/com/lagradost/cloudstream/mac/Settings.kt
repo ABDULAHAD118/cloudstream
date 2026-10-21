@@ -96,7 +96,7 @@ fun SettingsScreen() {
             Text(Downloads.folder.path.replace(System.getProperty("user.home"), "~"), style = MaterialTheme.typography.bodyMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 8.dp)) {
                 OutlinedButton(onClick = { chooseFolder()?.let { AppSettings.downloadFolder = it } }, modifier = Modifier.handCursor()) { Text("Change folder") }
-                if (AppSettings.downloadFolder != null) OutlinedButton(onClick = { AppSettings.downloadFolder = null }, modifier = Modifier.handCursor()) { Text("Use Movies folder") }
+                if (AppSettings.downloadFolder != null) OutlinedButton(onClick = { AppSettings.downloadFolder = null }, modifier = Modifier.handCursor()) { Text("Use $videosFolderName folder") }
             }
             Hint("Finished downloads stay where they are when you change the folder.")
             Label("Downloads at the same time")
@@ -154,6 +154,12 @@ private fun Toggle(text: String, checked: Boolean, onChange: (Boolean) -> Unit) 
 
 /** The native macOS folder picker. Returns null when cancelled. */
 private fun chooseFolder(): String? {
+    // Windows' native file dialog can't pick folders; Swing's chooser can
+    if (isWindows) return javax.swing.JFileChooser(Downloads.folder).run {
+        fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
+        dialogTitle = "Choose a download folder"
+        if (showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) selectedFile.path else null
+    }
     System.setProperty("apple.awt.fileDialogForDirectories", "true")
     return try {
         val dialog = java.awt.FileDialog(null as java.awt.Frame?, "Choose a download folder", java.awt.FileDialog.LOAD)

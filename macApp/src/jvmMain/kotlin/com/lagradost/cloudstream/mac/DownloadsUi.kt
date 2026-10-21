@@ -90,7 +90,7 @@ fun DownloadsScreen(play: (PlayItem) -> Unit) {
     LaunchedEffect(Unit) { while (true) { Downloads.forgetMissing(); delay(2000) } }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(Downloads.folder.path.replace(System.getProperty("user.home"), "~"), style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-        TextButton(onClick = { Downloads.folder.mkdirs(); ProcessBuilder("open", Downloads.folder.path).start() }, modifier = Modifier.handCursor()) {
+        TextButton(onClick = { openFolder(Downloads.folder) }, modifier = Modifier.handCursor()) {
             Icon(Icons.Filled.FolderOpen, null); Spacer(Modifier.width(4.dp)); Text("Open folder")
         }
     }
@@ -127,8 +127,8 @@ fun DownloadsScreen(play: (PlayItem) -> Unit) {
                                     colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black), modifier = Modifier.handCursor()) {
                                     Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(4.dp)); Text("Play")
                                 }
-                                TextButton(onClick = { ProcessBuilder("open", "-R", d.file).start() }, modifier = Modifier.handCursor()) {
-                                    Icon(Icons.Filled.FolderOpen, null); Spacer(Modifier.width(4.dp)); Text("Show in Finder")
+                                TextButton(onClick = { revealFile(File(d.file)) }, modifier = Modifier.handCursor()) {
+                                    Icon(Icons.Filled.FolderOpen, null); Spacer(Modifier.width(4.dp)); Text("Show in $fileManagerName")
                                 }
                             }
                             DownloadStatus.Downloading, DownloadStatus.Queued -> {
