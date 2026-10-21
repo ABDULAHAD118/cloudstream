@@ -323,7 +323,8 @@ private fun PlayerContent(
         controlsVisible = true
         if (engine.playing && !menuOpen) { delay(3000); controlsVisible = false }
     }
-    LaunchedEffect(Unit) { focus.requestFocus() }
+    // Menus take keyboard focus; take it back when they close so the shortcuts keep working
+    LaunchedEffect(menuOpen) { if (!menuOpen) focus.requestFocus() }
     KeepScreenAwake(engine.playing)
     val preview = remember { engine.createPreview() }
     DisposableEffect(preview) { onDispose { preview.release() } }
@@ -410,6 +411,7 @@ private fun PlayerContent(
                 if (at != pointerAt) { pointerAt = at; lastMove = System.currentTimeMillis() }
             }
             .onPointerEvent(PointerEventType.Press) { e ->
+                focus.requestFocus() // a click on a control would otherwise leave the shortcuts without focus
                 // Right-click anywhere opens the player menu at the pointer
                 if (e.buttons.isSecondaryPressed) contextMenuAt = e.changes.first().position
             }
@@ -420,8 +422,8 @@ private fun PlayerContent(
                     Key.Spacebar, Key.K -> togglePause()
                     Key.DirectionLeft, Key.J -> engine.skip(-10_000)
                     Key.DirectionRight, Key.L -> engine.skip(10_000)
-                    Key.DirectionUp -> engine.changeVolume(engine.volume + 10)
-                    Key.DirectionDown -> engine.changeVolume(engine.volume - 10)
+                    Key.DirectionUp -> engine.changeVolume(engine.volume + 5)
+                    Key.DirectionDown -> engine.changeVolume(engine.volume - 5)
                     Key.M -> engine.changeVolume(if (engine.volume == 0) 100 else 0)
                     Key.F -> toggleFullscreen()
                     Key.Escape -> if (window?.placement == WindowPlacement.Fullscreen) toggleFullscreen() else onBack()
