@@ -1,6 +1,9 @@
 package com.lagradost.cloudstream.mac
 
 import androidx.compose.ui.geometry.Offset
+import kotlin.test.assertEquals
+import androidx.compose.ui.input.key.Key
+import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -150,6 +153,77 @@ class PlayerControlsSmokeTest {
             // Used to buffer forever: the resume seek came before libVLC's HLS reader had started
             waitUntil(timeoutMillis = 60_000) { engine.playing && engine.time > 303_000 && engine.frame != null }
             println("resume: playing from ${engine.time / 1000} s")
+        }
+    }
+
+    // DASH-IF's live simulator: a dynamic manifest whose clock counts from 1970, like the live sports channels
+    private val liveChannel = object : MainAPI() {
+        override var name = "Test live"
+        override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+            callback(newExtractorLink("DASH-IF", "livesim", "https://livesim2.dashif.org/livesim2/testpic_2s/Manifest.mpd", ExtractorLinkType.DASH))
+            return true
+        }
+    }
+
+    /** Plays [api]'s stream as a live item until it's under way, with the controls up. */
+    private fun liveItem(api: MainAPI, check: ComposeUiTest.(PlayItem) -> Unit) {
+        val item = PlayItem("Channel", api.name, live = true)
+        WatchProgress.set(WatchProgress.key(api, item), 0, 0)
+        engine
+        var show by mutableStateOf(true)
+        runComposeUiTest(testTimeout = 3.minutes) {
+            setContent {
+                CloudStreamTheme(mode = CloudStreamThemeMode.Dark) {
+                    androidx.compose.material3.Surface { if (show) PlayerScreen(api, listOf(item), 0) {} }
+                }
+            }
+            waitUntil(timeoutMillis = 60_000) { engine.playing && engine.started && engine.frame != null }
+            Thread.sleep(2_000)
+            onAllNodes(isRoot()).onFirst().performMouseInput { moveTo(Offset(200f, 300f)); moveTo(Offset(220f, 310f)) } // controls up
+            waitForIdle()
+            check(item)
+            show = false; waitForIdle()
+        }
+    }
+
+    @Test
+    fun liveDvrSeekAndGoLive() {
+        if (System.getenv("CS_SMOKE") != "1") return
+        liveItem(liveChannel) { item ->
+            // A live clock counts from 1970, so there is no "0:42 / 1:02" timeline, just the LIVE badge at the edge
+            assertTrue(shown("LIVE"), "no LIVE badge: ${texts()}")
+            assertTrue(onAllNodesWithText(" / ", substring = true).fetchSemanticsNodes().isEmpty(), "a timeline is shown")
+            shot("5-live")
+
+            // The server's window is rewindable: ← goes 10 s back and the badge offers "Go live" from there
+            val atEdge = engine.time
+            onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.DirectionLeft) }
+            waitUntil(timeoutMillis = 15_000) { shown("Go live") }
+            val rewound = engine.time
+            assertTrue(rewound in 1..atEdge - 8_000, "← didn't rewind: ${atEdge / 1000} s -> ${rewound / 1000} s")
+            Thread.sleep(3_000) // libVLC must keep the jump, not snap back to the edge
+            assertTrue(shown("Go live"), "went back to live on its own")
+            assertTrue(engine.time < atEdge - 5_000, "the rewind didn't stick: ${engine.time / 1000} s")
+            shot("5b-rewound")
+
+            // "Go live" catches up with the edge again
+            onNodeWithText("Go live").performClick()
+            waitUntil(timeoutMillis = 60_000) { engine.playing && engine.started && engine.frame != null && engine.time > atEdge }
+            onAllNodes(isRoot()).onFirst().performMouseInput { moveTo(Offset(200f, 300f)); moveTo(Offset(220f, 310f)) } // the controls hid
+            waitUntil(timeoutMillis = 10_000) { shown("LIVE") }
+            shot("5c-back-live")
+        }
+        assertEquals(0L, WatchProgress.get(WatchProgress.key(liveChannel, PlayItem("Channel", liveChannel.name)))) // nothing saved on leaving
+    }
+
+    @Test
+    fun recordingLabelledLiveKeepsItsTimeline() {
+        if (System.getenv("CS_SMOKE") != "1") return
+        // Live extensions' "Highlights" are recordings sent as live: once it plays, the stream has the last word
+        liveItem(hls) {
+            shot("5b-recording-labelled-live")
+            assertTrue(onAllNodesWithText("LIVE").fetchSemanticsNodes().isEmpty(), "a recording got the LIVE badge")
+            assertTrue(onAllNodesWithContentDescription("Forward 10 seconds").fetchSemanticsNodes().isNotEmpty(), "no skip button")
         }
     }
 }

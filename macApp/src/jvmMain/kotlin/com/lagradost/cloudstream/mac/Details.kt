@@ -107,7 +107,7 @@ private fun Details(
     val playlist = episodes.map { PlayItem("${res.name} - ${label(it)}", it.data) }
     val single = when (res) {
         is MovieLoadResponse -> PlayItem(res.name, res.dataUrl)
-        is LiveStreamLoadResponse -> PlayItem(res.name, res.dataUrl)
+        is LiveStreamLoadResponse -> PlayItem(res.name, res.dataUrl, live = true)
         else -> null
     }
 

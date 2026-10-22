@@ -161,6 +161,9 @@ class UiFlowSmokeTest {
             onAllNodesWithText("Search").onFirst().performClick() // the sidebar item; the screen's button comes later
             onNodeWithText("Search all providers").performTextClearance()
             onNodeWithText("Search all providers").performTextInput("big buck bunny")
+            // Titles from TheMovieDB show under the field while typing
+            waitUntil(timeoutMillis = 20_000) { onAllNodesWithTag("search-suggestion").fetchSemanticsNodes().isNotEmpty() }
+            shot("06a-search-suggestions")
             onNodeWithTag("home-search").performImeAction()
             waitForText("Internet Archive"); waitForIdle(); Thread.sleep(3000); shot("06-search")
             assertTrue(loadMoreInFirstRow(), "search row offered no further page")
@@ -193,8 +196,20 @@ class UiFlowSmokeTest {
             onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.Spacebar) } // resume
             val before = position()!!
             onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.DirectionRight) } // +10 s
+            waitUntil { onAllNodesWithText("+10s").fetchSemanticsNodes().isNotEmpty() } // the right-side flash
             try { waitUntil(timeoutMillis = 90_000) { (position() ?: 0) >= before + 12 } } catch (e: Throwable) { shot("fail-seek"); throw e }
             shot("10-player-seeked")
+            // ↑ shows the new level in the centre; ↓ puts it back
+            val volume = VideoEngine.shared().getOrThrow().volume
+            onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.DirectionUp) }
+            waitUntil { onAllNodesWithText("${volume + 5}%").fetchSemanticsNodes().isNotEmpty() }
+            shot("10-player-volume")
+            onAllNodes(isRoot()).onFirst().performKeyInput { pressKey(Key.DirectionDown) }
+            waitUntil { VideoEngine.shared().getOrThrow().volume == volume }
+            // Hovering a control names it, with its key
+            onNodeWithContentDescription("Forward 10 seconds").performMouseInput { moveTo(center) }
+            waitUntil { onAllNodesWithText("Forward 10 seconds (→)").fetchSemanticsNodes().isNotEmpty() }
+            shot("10-player-hover-label")
             // Hovering the seek bar shows the frame there, from a second silent player
             onNodeWithTag("seek-bar").performMouseInput { moveTo(Offset(width * 0.6f, height / 2f)) }
             waitUntil(timeoutMillis = 20_000) { onAllNodesWithContentDescription("Preview frame", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }

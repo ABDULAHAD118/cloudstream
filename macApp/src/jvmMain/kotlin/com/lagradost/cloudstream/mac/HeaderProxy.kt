@@ -9,6 +9,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -24,6 +25,7 @@ import java.util.concurrent.TimeUnit
 object HeaderProxy {
     private val token = UUID.randomUUID().toString() // keeps other local apps from using it as an open proxy
     private val headerSets = ConcurrentHashMap<String, Map<String, String>>()
+    private val clearKeys = ConcurrentHashMap<String, ByteArray>() // proxy id -> ClearKey content key (see Cenc)
 
     private val server: HttpServer by lazy {
         HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0).apply {
@@ -38,6 +40,101 @@ object HeaderProxy {
         val id = UUID.randomUUID().toString().take(8)
         headerSets[id] = headers
         return proxied(id, url)
+    }
+
+    /**
+     * Like [wrap] for a ClearKey DASH manifest: its segments come back decrypted, so libVLC plays them. Segment URLs
+     * are templates relative to the manifest (`video_$Number$.mp4`) and can't be wrapped one by one like HLS's, so
+     * the manifest itself is served from "/b/<its folder>/", where libVLC's relative requests land too.
+     */
+    fun wrapClearKey(url: String, headers: Map<String, String>, key: ByteArray): String {
+        val id = UUID.randomUUID().toString().take(8)
+        headerSets[id] = headers
+        clearKeys[id] = key
+        return proxiedPath(id, url)
+    }
+
+    private fun proxiedPath(id: String, url: String): String {
+        val path = url.substringBefore('?')
+        val query = url.substringAfter('?', "")
+        return proxiedDir(id, path.substringBeforeLast('/') + "/") + path.substringAfterLast('/') + (if (query.isEmpty()) "" else "?$query")
+    }
+
+    /** Absolute BaseURLs would send libVLC straight to the host, past the decryption; they go through the proxy too. */
+    fun rewriteManifest(mpd: String, wrapUrl: (String) -> String): String =
+        Regex("<BaseURL>\\s*(https?://[^<\\s]+)\\s*</BaseURL>").replace(mergePeriods(mpd)) { "<BaseURL>${wrapUrl(it.groupValues[1])}</BaseURL>" }
+
+    /**
+     * Live channels open a new Period at every ad break, and libVLC 3 never crosses from one live Period to the next:
+     * it waits at the boundary with "Buffering… 0%". Their Periods are cuts of one feed (numbers, times and segment
+     * names run on), so their timelines join into the first Period. Anything that doesn't line up is left alone.
+     */
+    fun mergePeriods(mpd: String): String {
+        if ("dynamic" !in mpd || mpd.indexOf("<Period") == mpd.lastIndexOf("<Period")) return mpd
+        return runCatching {
+            val doc = javax.xml.parsers.DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+                .newDocumentBuilder().parse(org.xml.sax.InputSource(java.io.StringReader(mpd)))
+            fun org.w3c.dom.Element.children(name: String) =
+                (0 until childNodes.length).map { childNodes.item(it) }.filterIsInstance<org.w3c.dom.Element>().filter { it.localName == name }
+            val root = doc.documentElement
+            if (root.getAttribute("type") != "dynamic") return mpd
+            val periods = root.children("Period")
+            // Each Representation's template, keyed by its AdaptationSet's position and its id
+            fun templates(period: org.w3c.dom.Element) = period.children("AdaptationSet").withIndex().flatMap { (i, set) ->
+                set.children("Representation").map { rep -> "$i/${rep.getAttribute("id")}" to (rep.children("SegmentTemplate").firstOrNull() ?: set.children("SegmentTemplate").firstOrNull()) }
+            }.toMap()
+            fun lastNumber(template: org.w3c.dom.Element): Long {
+                val timeline = template.children("SegmentTimeline").single()
+                return template.getAttribute("startNumber").ifEmpty { "1" }.toLong() - 1 +
+                    timeline.children("S").sumOf { (it.getAttribute("r").ifEmpty { "0" }.toLong()) + 1 }
+            }
+            val first = templates(periods.first())
+            for (period in periods.drop(1)) {
+                val next = templates(period)
+                check(next.keys == first.keys)
+                for ((key, template) in next) {
+                    val into = first.getValue(key)!!
+                    template!!
+                    for (attr in listOf("media", "initialization", "timescale")) check(template.getAttribute(attr) == into.getAttribute(attr))
+                    check(template.getAttribute("startNumber").toLong() == lastNumber(into) + 1)
+                }
+                // Every check passed for this Period: move its segments over
+                for ((key, template) in next) {
+                    val timeline = first.getValue(key)!!.children("SegmentTimeline").single()
+                    template!!.children("SegmentTimeline").single().children("S").forEach { timeline.appendChild(it) }
+                }
+                root.removeChild(period)
+            }
+            periods.first().removeAttribute("duration")
+            java.io.StringWriter().also { out ->
+                javax.xml.transform.TransformerFactory.newInstance().newTransformer()
+                    .transform(javax.xml.transform.dom.DOMSource(doc), javax.xml.transform.stream.StreamResult(out))
+            }.toString()
+        }.getOrDefault(mpd) // shortcut: any Period that doesn't line up leaves the whole manifest as it was
+    }
+
+    private fun proxiedDir(id: String, dir: String) =
+        "http://127.0.0.1:${server.address.port}/$token/$id/b/${Base64.getUrlEncoder().withoutPadding().encodeToString(dir.toByteArray())}/"
+
+    /** Manifests keep their segments on the proxy (see [rewriteManifest]); init and media segments are decrypted whole. */
+    private fun serveClearKey(exchange: HttpExchange, id: String, target: String, headers: Map<String, String>, key: ByteArray) {
+        val started = System.currentTimeMillis()
+        val request = Request.Builder().url(target).apply { headers.forEach { (k, v) -> header(k, v) } }.build()
+        client.newCall(request).execute().use { response ->
+            val type = response.header("Content-Type").orEmpty()
+            val raw = response.body.bytes()
+            val bytes = when {
+                !response.isSuccessful -> raw
+                type.contains("dash+xml", true) || response.request.url.encodedPath.endsWith(".mpd") ->
+                    rewriteManifest(raw.decodeToString()) { proxiedPath(id, it) }.toByteArray()
+                else -> Cenc.process(raw, key)
+            }
+            if (log) println("proxy clearkey: ${System.currentTimeMillis() - started} ms ${exchange.requestMethod} ${response.code} $type ${raw.size}->${bytes.size} ${target.substringBefore('?').takeLast(60)}")
+            if (type.isNotEmpty()) exchange.responseHeaders.add("Content-Type", type)
+            if (exchange.requestMethod.equals("HEAD", true)) return exchange.sendResponseHeaders(response.code, -1)
+            exchange.sendResponseHeaders(response.code, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
     }
 
     private fun proxied(id: String, url: String) =
@@ -166,9 +263,14 @@ object HeaderProxy {
 
     private fun handle(exchange: HttpExchange) {
         try {
-            val id = exchange.requestURI.path.substringAfterLast('/')
-            val headers = headerSets[id] ?: return exchange.sendResponseHeaders(404, -1)
-            val target = URLDecoder.decode(exchange.requestURI.rawQuery.removePrefix("u="), Charsets.UTF_8)
+            val rest = exchange.requestURI.rawPath.removePrefix("/$token/")
+            val id = rest.substringBefore('/')
+            val headers = headerSets[id] ?: return exchange.sendResponseHeaders(404, -1).also { if (log) println("proxy: unknown ${exchange.requestURI}") }
+            val target = if ("/b/" in rest) { // a segment under a manifest's BaseURL (see rewriteManifest)
+                val (dir, path) = rest.substringAfter("/b/").let { it.substringBefore('/') to it.substringAfter('/') }
+                String(Base64.getUrlDecoder().decode(dir)) + path + (exchange.requestURI.rawQuery?.let { "?$it" } ?: "")
+            } else URLDecoder.decode(exchange.requestURI.rawQuery.removePrefix("u="), Charsets.UTF_8)
+            clearKeys[id]?.let { return serveClearKey(exchange, id, target, headers, it) }
             val head = exchange.requestMethod.equals("HEAD", true)
             if (!head && exchange.requestHeaders.getFirst("Range") == null) {
                 segment(target, headers)?.let { seg ->
@@ -219,6 +321,7 @@ object HeaderProxy {
                 }
             }
         } catch (t: Throwable) {
+            if (log) println("proxy: failed ${exchange.requestURI.rawPath.takeLast(80)}: $t")
             runCatching { exchange.sendResponseHeaders(502, -1) }
         } finally {
             exchange.close()

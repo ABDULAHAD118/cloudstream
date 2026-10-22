@@ -284,7 +284,7 @@ private fun HeroText(api: MainAPI, item: HeroItem, open: (Screen) -> Unit) {
             PrimaryCapsuleButton("Play", Icons.Filled.PlayArrow) {
                 // Movies play straight away; shows open their page to pick an episode
                 val data = (d as? MovieLoadResponse)?.dataUrl ?: (d as? LiveStreamLoadResponse)?.dataUrl
-                if (d != null && data != null) open(Play(api, listOf(PlayItem(d.name, data)), 0, PlayParent(d.url, d.name, d.backgroundPosterUrl ?: d.posterUrl)))
+                if (d != null && data != null) open(Play(api, listOf(PlayItem(d.name, data, live = d is LiveStreamLoadResponse)), 0, PlayParent(d.url, d.name, d.backgroundPosterUrl ?: d.posterUrl)))
                 else open(details)
             }
             GlassButton(Icons.Outlined.Info, "Details", text = "Details") { open(details) }
@@ -346,6 +346,15 @@ fun HomeScreen(open: (Screen) -> Unit) {
 fun SearchScreen(open: (Screen) -> Unit) {
     val search = { SearchState.search(Providers.list) }
     val focus = remember { FocusRequester() }
+    // Suggestions while typing, 300 ms after the last key; a new key cancels the old lookup
+    var suggestions by remember { mutableStateOf(listOf<String>()) }
+    LaunchedEffect(SearchState.query) {
+        val q = SearchState.query.trim()
+        suggestions = emptyList()
+        if (q == SearchState.searched) return@LaunchedEffect
+        delay(300)
+        suggestions = SearchSuggestions.get(q)
+    }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     Column(Modifier.fillMaxSize()) {
         LargeTitle("Search") { if (SearchState.searched.isNotEmpty()) GlassButton(Icons.Filled.Refresh, "Reload") { SearchState.query = SearchState.searched; search() } }
@@ -364,6 +373,19 @@ fun SearchScreen(open: (Screen) -> Unit) {
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions { search() },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp).focusRequester(focus).testTag("home-search"),
         )
+        if (suggestions.isNotEmpty() && SearchState.query.trim() != SearchState.searched) Column(Modifier.padding(horizontal = 32.dp, vertical = 6.dp)) {
+            suggestions.forEach { title ->
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).handCursor()
+                        .clickable { SearchState.query = title; search() }.padding(horizontal = 14.dp, vertical = 10.dp).testTag("search-suggestion"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Search, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(14.dp))
+                    Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
         NoProviders()
         if (SearchState.searching) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 8.dp))
         when {

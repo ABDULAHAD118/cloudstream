@@ -28,6 +28,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -53,10 +55,12 @@ import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import com.lagradost.cloudstream3.utils.DrmExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -67,6 +71,8 @@ data class PlayItem(
     val title: String, val data: String, val file: String? = null, val subtitleFiles: List<String> = emptyList(),
     /** Names for a downloaded file's audio tracks, in order, when the file itself doesn't carry them. */
     val audioNames: List<String> = emptyList(),
+    /** A live channel: no timeline, skipping or saved position. */
+    val live: Boolean = false,
 )
 
 val LocalWindowState = staticCompositionLocalOf<WindowState?> { null }
@@ -114,10 +120,12 @@ fun canSeek(link: ExtractorLink): Boolean {
 
 /**
  * False for DASH that needs headers beyond Referer and User-Agent (MovieBox's X-MB-Token): DASH skips the proxy
- * (see [playbackUrl]) and libVLC can't send them, so the host answers 403.
+ * (see [playbackUrl]) and libVLC can't send them, so the host answers 403. For DRM, true only for ClearKey with its
+ * key, which the proxy decrypts (see [Cenc]); libVLC can't decrypt the rest (Widevine) and shows a black picture.
  */
 fun canPlay(link: ExtractorLink): Boolean =
-    link.type != ExtractorLinkType.DASH || link.headers.keys.all { it.equals("Referer", true) || it.equals("User-Agent", true) }
+    if (link is DrmExtractorLink) Cenc.keyOf(link) != null
+    else link.type != ExtractorLinkType.DASH || link.headers.keys.all { it.equals("Referer", true) || it.equals("User-Agent", true) }
 
 /**
  * Best first up to [maxQuality], like Android, preferring sources that can seek (resume and skipping need it);
@@ -202,14 +210,16 @@ private fun PlayerContent(
     var openMenu by remember { mutableStateOf<String?>(null) } // "more" or "subtitles"; keeps the controls up
     var contextMenuAt by remember { mutableStateOf<Offset?>(null) }
     var pauseFlash by remember { mutableStateOf(0 to false) } // (count, paused) for the centre icon
-    var seekFlash by remember { mutableStateOf(0 to 0L) } // (count, ms) for the double-click feedback
+    var seekFlash by remember { mutableStateOf(0 to 0L) } // (count, ms) for the double-click and arrow-key feedback
+    var volumeFlash by remember { mutableStateOf(0) } // count, for the centre volume level after a key
 
     fun play(link: ExtractorLink, startAt: Long, audioIndex: Int = defaultAudio(link.audioTracks.map { it.url })) {
         current = link
         currentAudio = audioIndex
-        message = null
+        message = if (!canPlay(link) && link is DrmExtractorLink) "${link.name} is DRM-protected, which this player can't decrypt. Pick another source." else null
         val headers = Player.headersFor(link)
-        val url = playbackUrl(link.url, link.type, headers)
+        val clearKey = (link as? DrmExtractorLink)?.let(Cenc::keyOf)
+        val url = if (clearKey != null) HeaderProxy.wrapClearKey(link.url, headers, clearKey) else playbackUrl(link.url, link.type, headers)
         startedAt = startAt
         // Like ExoPlayer merging the extension's audio tracks: libVLC plays the chosen one next to the video
         val audio = link.audioTracks.getOrNull(audioIndex)?.let { track ->
@@ -222,7 +232,23 @@ private fun PlayerContent(
         }
     }
 
+    // The extension's word until the stream plays, then the stream's: a live clock has no length or runs past it
+    // (DASH counts from 1970). Highlights are labelled live but are recordings, and older Up Next entries lack the flag.
+    // A function, as the save on leaving runs from the first composition's closure
+    fun isLive() = if (engine.started) engine.length <= 0 || engine.time > engine.length + 5_000 else item.live
+    val live = isLive()
+
+    // Where "now" is in a live stream: the clock when it reached the live edge, carried on by the wall clock (a
+    // paused stream falls behind). Each open at the edge sets it again; a stream that runs ahead of it moves it.
+    var liveAnchor by remember { mutableStateOf<Pair<Long, Long>?>(null) } // (clock, wall time)
+    fun liveEdge() = liveAnchor?.let { (clock, wall) -> clock + (System.currentTimeMillis() - wall) }
+    LaunchedEffect(engine.started) { if (engine.started && isLive() && liveAnchor == null) liveAnchor = engine.time to System.currentTimeMillis() }
+    LaunchedEffect(engine.time) { if (liveEdge()?.let { engine.time > it } == true) liveAnchor = engine.time to System.currentTimeMillis() }
+    var liveTick by remember { mutableStateOf(0) } // a paused live stream still falls behind; redraw each second
+    LaunchedEffect(live) { while (live) { delay(1000); liveTick++ } }
+
     fun saveProgress() {
+        if (isLive()) return // a live channel has no place to come back to, so it stays out of Up Next
         WatchProgress.set(progressKey, engine.time, engine.length)
         onProgress(item, engine.time, engine.length)
     }
@@ -292,19 +318,28 @@ private fun PlayerContent(
         var stalledFor = 0
         while (true) {
             delay(5_000)
-            stalledFor = if (engine.playing && !engine.ended && engine.time == last) stalledFor + 5 else 0
+            // Only after it has played once: a stream that is still opening is the deadline's business, and cutting
+            // its connection every 20 s kept slow live manifests from ever finishing (the reopen interrupts TLS)
+            stalledFor = if (engine.playing && engine.started && !engine.ended && engine.time == last) stalledFor + 5 else 0
             last = engine.time
             if (stalledFor >= 20) {
                 stalledFor = 0
                 message = "Playback stalled, reconnecting…"
-                play(link, engine.time, currentAudio)
+                // Live can't resume mid-window safely (an ad break, a dropped segment): rejoin at the live edge
+                if (isLive()) liveAnchor = null
+                play(link, if (isLive()) 0L else engine.time, currentAudio)
             }
         }
     }
     // Hindi audio by default when the stream itself has languages (HLS audio groups, MKV). Tracks show up once it's
-    // playing, so look for a few seconds after each open; choosing another under Audio afterwards sticks
+    // playing, so look for a few seconds after each open; choosing another under Audio afterwards sticks.
+    // Only after the resume seek has landed and played a second: switching sooner restarted multi-language HLS at
+    // 0:00 or stalled it
     LaunchedEffect(engine.opens) {
         if (current == null) return@LaunchedEffect
+        snapshotFlow { engine.started }.first { it }
+        val resumedAt = engine.time
+        snapshotFlow { engine.time }.first { it >= resumedAt + 1000 }
         repeat(20) {
             delay(500)
             val tracks = withContext(Dispatchers.IO) { engine.audioTracks() }.filter { it.id() >= 0 }
@@ -333,6 +368,31 @@ private fun PlayerContent(
     fun togglePause() {
         pauseFlash = (pauseFlash.first + 1) to engine.playing
         engine.togglePause()
+    }
+
+    fun goLive() {
+        liveAnchor = null
+        current?.let { play(it, 0, currentAudio) } // opening afresh starts at the live edge
+    }
+
+    /** Plays [behind] ms before "now", within the window the server keeps (libVLC reports it as the length). */
+    fun liveSeekBehind(behind: Long) {
+        val edge = liveEdge() ?: return
+        if (engine.length <= 0 || behind < 3_000) return goLive() // no window, or close enough to the edge
+        engine.seekLive(edge - behind.coerceAtMost((engine.length - 5_000).coerceAtLeast(0)))
+    }
+
+    fun skipBy(ms: Long) {
+        if (isLive()) {
+            if (engine.length <= 0) return // no window to move in
+            liveSeekBehind((liveEdge() ?: return) - engine.time - ms)
+        } else engine.skip(ms)
+        seekFlash = (seekFlash.first + 1) to ms
+    }
+
+    fun setVolume(value: Int) {
+        engine.changeVolume(value)
+        volumeFlash++
     }
 
     fun toggleFullscreen() {
@@ -386,7 +446,7 @@ private fun PlayerContent(
 
     val menuActions = PlayerMenuActions(
         engine = engine, links = sortLinks(links, maxQuality), current = current, maxQuality = maxQuality, currentAudio = currentAudio,
-        audioNames = item.audioNames,
+        audioNames = item.audioNames, live = live,
         onQuality = { q ->
             maxQuality = q; QualityPreference.max = q
             // Switch to the best source under the new cap, keeping the position; if that's the current one and
@@ -420,11 +480,11 @@ private fun PlayerContent(
                 lastMove = System.currentTimeMillis()
                 when (e.key) {
                     Key.Spacebar, Key.K -> togglePause()
-                    Key.DirectionLeft, Key.J -> engine.skip(-10_000)
-                    Key.DirectionRight, Key.L -> engine.skip(10_000)
-                    Key.DirectionUp -> engine.changeVolume(engine.volume + 5)
-                    Key.DirectionDown -> engine.changeVolume(engine.volume - 5)
-                    Key.M -> engine.changeVolume(if (engine.volume == 0) 100 else 0)
+                    Key.DirectionLeft, Key.J -> skipBy(-10_000)
+                    Key.DirectionRight, Key.L -> skipBy(10_000)
+                    Key.DirectionUp -> setVolume(engine.volume + 5)
+                    Key.DirectionDown -> setVolume(engine.volume - 5)
+                    Key.M -> setVolume(if (engine.volume == 0) 100 else 0)
                     Key.F -> toggleFullscreen()
                     Key.Escape -> if (window?.placement == WindowPlacement.Fullscreen) toggleFullscreen() else onBack()
                     Key.N -> goTo(index + 1)
@@ -440,9 +500,7 @@ private fun PlayerContent(
             Modifier.fillMaxSize().semantics { contentDescription = item.title }.pointerInput(Unit) {
                     // Double-click: the left half goes back 10 s, the right half forward, like YouTube
                     detectTapGestures(onTap = { togglePause() }, onDoubleTap = { at ->
-                        val ms = if (at.x < size.width / 2) -10_000L else 10_000L
-                        engine.skip(ms)
-                        seekFlash = (seekFlash.first + 1) to ms
+                        skipBy(if (at.x < size.width / 2) -10_000L else 10_000L)
                     })
                 },
         ) {
@@ -459,6 +517,14 @@ private fun PlayerContent(
         Flash(seekFlash.first, Modifier.align(if (seekFlash.second < 0) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = 80.dp)) {
             Text(if (seekFlash.second < 0) "−10s" else "+10s", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50)).padding(horizontal = 20.dp, vertical = 12.dp))
+        }
+        Flash(volumeFlash, Modifier.align(Alignment.Center)) {
+            Row(Modifier.background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50)).padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Icon(volumeIcon(engine.volume), null, tint = Color.White, modifier = Modifier.size(28.dp))
+                Spacer(Modifier.width(10.dp))
+                Text("${engine.volume}%", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            }
         }
 
         val showControls = controlsVisible || !engine.playing || menuOpen
@@ -478,7 +544,7 @@ private fun PlayerContent(
                 if (loadingLinks) Text("Loading sources… (${links.size} found)", color = Color.White)
                 else {
                     val speed = if (current?.type == ExtractorLinkType.M3U8) HeaderProxy.recentSpeedKBps() else null
-                    Text("Buffering…" + (speed?.let { " $it KB/s" } ?: ""), color = Color.White)
+                    Text("Buffering… ${engine.bufferPercent}%", color = Color.White)
                     // Seen with real hosts: tens of KB/s, below what 720p needs
                     if (speed != null && speed < 80) Text(
                         "This source is slow right now. A lower quality (⋮ → Quality) plays more smoothly.",
@@ -496,7 +562,7 @@ private fun PlayerContent(
                     .padding(horizontal = 12.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onBack, modifier = Modifier.handCursor()) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) }
+                HoverLabel("Back (Esc)", Alignment.BottomCenter) { IconButton(onClick = onBack, modifier = Modifier.handCursor()) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Color.White) } }
                 Column(Modifier.weight(1f)) {
                     Text(item.title, color = Color.White, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                     current?.let {
@@ -510,6 +576,9 @@ private fun PlayerContent(
             }
             PlayerBar(
                 engine, Modifier.align(Alignment.BottomCenter), title = item.title, preview = preview, onSeekBarActive = { overSeekBar = it },
+                live = if (!live) null else liveTick.let {
+                    LiveBar(liveEdge()?.let { (it - engine.time).coerceAtLeast(0) } ?: 0, engine.length.coerceAtLeast(0), ::liveSeekBehind, ::goLive)
+                },
                 hasNext = index < items.lastIndex, nextTitle = items.getOrNull(index + 1)?.title,
                 onNext = { goTo(index + 1) }, onFullscreen = ::toggleFullscreen, onTogglePause = ::togglePause,
                 fullscreen = window?.placement == WindowPlacement.Fullscreen,
@@ -569,7 +638,7 @@ private fun SubtitleText(text: String, size: Int, modifier: Modifier) {
 
 @Composable
 private fun PlayerBar(
-    engine: VideoEngine, modifier: Modifier, title: String, preview: SeekPreview?, onSeekBarActive: (Boolean) -> Unit,
+    engine: VideoEngine, modifier: Modifier, title: String, live: LiveBar?, preview: SeekPreview?, onSeekBarActive: (Boolean) -> Unit,
     hasNext: Boolean, nextTitle: String?, onNext: () -> Unit,
     fullscreen: Boolean, onFullscreen: () -> Unit, onTogglePause: () -> Unit,
     subtitleMenu: @Composable () -> Unit, moreMenu: @Composable () -> Unit,
@@ -579,7 +648,16 @@ private fun PlayerBar(
             .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))))
             .padding(horizontal = 20.dp).padding(top = 40.dp, bottom = 10.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // A live clock counts from 1970, so live gets a timeline of the window the server keeps, ending at "now"
+        if (live != null) Row(verticalAlignment = Alignment.CenterVertically) {
+            if (live.window > 0) {
+                SeekBar(live.window - live.behind, live.window, { live.seekBehind(live.window - it) }, Modifier.weight(1f), null, onSeekBarActive,
+                    label = { "-${formatTime(live.window - it)}" }) // where in the window, as "behind live"
+                Spacer(Modifier.width(14.dp))
+                if (live.behind > LIVE_SLACK) Text("−${formatTime(live.behind)}", color = Color.White, fontSize = 14.sp, modifier = Modifier.padding(end = 10.dp))
+            }
+            LiveBadge(live.behind <= LIVE_SLACK, live.goLive)
+        } else Row(verticalAlignment = Alignment.CenterVertically) {
             SeekBar(engine.time, engine.length, engine::seekTo, Modifier.weight(1f), preview, onSeekBarActive)
             Spacer(Modifier.width(14.dp))
             Text("${formatTime(engine.time)} / ${formatTime(engine.length)}", color = Color.White, fontSize = 14.sp)
@@ -587,30 +665,56 @@ private fun PlayerBar(
         Box(Modifier.fillMaxWidth().padding(top = 4.dp)) {
             val tint = Color.White
             Row(Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onTogglePause, modifier = Modifier.size(52.dp).handCursor()) {
-                    Icon(if (engine.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (engine.playing) "Pause" else "Play", tint = tint, modifier = Modifier.size(40.dp))
+                HoverLabel(if (engine.playing) "Pause (Space)" else "Play (Space)") {
+                    IconButton(onClick = onTogglePause, modifier = Modifier.size(52.dp).handCursor()) {
+                        Icon(if (engine.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (engine.playing) "Pause" else "Play", tint = tint, modifier = Modifier.size(40.dp))
+                    }
                 }
-                IconButton(onClick = { engine.skip(-10_000) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = tint, modifier = Modifier.size(30.dp)) }
-                IconButton(onClick = { engine.skip(10_000) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = tint, modifier = Modifier.size(30.dp)) }
+                val canSkip = live == null || live.window > 0
+                if (canSkip) HoverLabel("Back 10 seconds (←)") { IconButton(onClick = { if (live != null) live.seekBehind(live.behind + 10_000) else engine.skip(-10_000) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Replay10, "Back 10 seconds", tint = tint, modifier = Modifier.size(30.dp)) } }
+                if (canSkip) HoverLabel("Forward 10 seconds (→)") { IconButton(onClick = { if (live != null) live.seekBehind(live.behind - 10_000) else engine.skip(10_000) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Forward10, "Forward 10 seconds", tint = tint, modifier = Modifier.size(30.dp)) } }
                 VolumeControl(engine.volume, engine::changeVolume)
             }
             // Netflix puts the title in the middle of the bar
             Text(title, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.align(Alignment.Center).widthIn(max = 420.dp))
             Row(Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically) {
-                if (hasNext) IconButton(onClick = onNext, modifier = Modifier.handCursor()) { Icon(Icons.Filled.SkipNext, "Next episode${nextTitle?.let { ": $it" } ?: ""}", tint = tint, modifier = Modifier.size(30.dp)) }
+                if (hasNext) HoverLabel("Next episode (N)${nextTitle?.let { ": $it" } ?: ""}") {
+                    IconButton(onClick = onNext, modifier = Modifier.handCursor()) { Icon(Icons.Filled.SkipNext, "Next episode${nextTitle?.let { ": $it" } ?: ""}", tint = tint, modifier = Modifier.size(30.dp)) }
+                }
                 subtitleMenu()
                 moreMenu()
-                IconButton(onClick = onFullscreen, modifier = Modifier.handCursor()) { Icon(if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen, "Fullscreen", tint = tint, modifier = Modifier.size(30.dp)) }
+                HoverLabel(if (fullscreen) "Exit full screen (F)" else "Full screen (F)") {
+                    IconButton(onClick = onFullscreen, modifier = Modifier.handCursor()) { Icon(if (fullscreen) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen, "Fullscreen", tint = tint, modifier = Modifier.size(30.dp)) }
+                }
             }
         }
     }
 }
 
+/** Within this of the live edge counts as live: libVLC plays a few seconds behind it anyway. */
+private const val LIVE_SLACK = 5_000L
+
+/** A live stream's place: [behind] ms before "now", in the [window] ms the server keeps. */
+class LiveBar(val behind: Long, val window: Long, val seekBehind: (Long) -> Unit, val goLive: () -> Unit)
+
+/** Red "LIVE" at the live edge; behind it, a "Go live" button back to it, like YouTube's. */
+@Composable
+private fun LiveBadge(atEdge: Boolean, goLive: () -> Unit) {
+    val badge = @Composable { modifier: Modifier ->
+        Row(Modifier.clip(RoundedCornerShape(50)).then(modifier).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(9.dp).background(if (atEdge) Color(0xFFE53935) else Color.Gray, CircleShape))
+            Spacer(Modifier.width(8.dp))
+            Text(if (atEdge) "LIVE" else "Go live", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        }
+    }
+    if (atEdge) badge(Modifier) else HoverLabel("Jump to live") { badge(Modifier.handCursor().clickable(onClick = goLive).background(Color.White.copy(alpha = 0.12f))) }
+}
+
 /** Everything the ⋮ and right-click menus can do. */
 class PlayerMenuActions(
     val engine: VideoEngine, val links: List<ExtractorLink>, val current: ExtractorLink?, val maxQuality: Int, val currentAudio: Int,
-    val audioNames: List<String>,
+    val audioNames: List<String>, val live: Boolean,
     val onQuality: (Int) -> Unit, val onSource: (ExtractorLink) -> Unit, val onExtensionAudio: (Int) -> Unit,
     val onReload: () -> Unit, val onDownload: () -> Unit,
 )
@@ -618,7 +722,7 @@ class PlayerMenuActions(
 @Composable
 private fun PlayerMoreMenu(actions: PlayerMenuActions, open: Boolean, onOpen: (Boolean) -> Unit) {
     Box {
-        IconButton(onClick = { onOpen(true) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.MoreVert, "More options", tint = Color.White) }
+        HoverLabel("Settings") { IconButton(onClick = { onOpen(true) }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.MoreVert, "More options", tint = Color.White) } }
         PlayerMenuContent(actions, open) { onOpen(false) }
     }
 }
@@ -658,9 +762,9 @@ private fun PlayerMenuContent(actions: PlayerMenuActions, expanded: Boolean, onD
                 val extensionAudio = actions.current?.audioTracks.orEmpty()
                 if (extensionAudio.size > 1 || e.audioTracks().count { it.id() >= 0 } > 1) entry(Icons.Filled.Audiotrack, "Audio", null) { page = "audio" }
                 // Same as the Android player's "Skip OP" button
-                entry(Icons.Filled.FastForward, "Skip intro", "+85 s") { e.skip(85_000); close() }
+                if (!actions.live) entry(Icons.Filled.FastForward, "Skip intro", "+85 s") { e.skip(85_000); close() }
                 entry(Icons.Filled.Refresh, "Reload sources", null) { actions.onReload(); close() }
-                entry(Icons.Filled.Download, "Download", null) { actions.onDownload(); close() }
+                if (!actions.live) entry(Icons.Filled.Download, "Download", null) { actions.onDownload(); close() }
             }
             "speed" -> { back(); speeds.forEach { s -> choice("${s}x", s == e.rate) { e.setSpeed(s) } } }
             "quality" -> {
@@ -672,7 +776,7 @@ private fun PlayerMenuContent(actions: PlayerMenuActions, expanded: Boolean, onD
             "source" -> {
                 back()
                 actions.links.forEach { link ->
-                    val note = if (canSeek(link)) "" else " · no seeking"
+                    val note = if (!canPlay(link)) " · can't play" else if (canSeek(link)) "" else " · no seeking"
                     choice("${link.name} · ${if (link.quality > 0) "${link.quality}p" else "auto"}$note", link == actions.current) { actions.onSource(link) }
                 }
             }
@@ -703,8 +807,10 @@ private fun SubtitleMenu(
     onPick: (SubtitleOption?) -> Unit, onSize: (Int) -> Unit, onDelay: (Long) -> Unit,
 ) {
     Box {
-        IconButton(onClick = { onOpen(true) }, modifier = Modifier.handCursor()) {
-            Icon(Icons.Filled.Subtitles, "Subtitles", tint = if (selected != null) PlayerAccent else Color.White)
+        HoverLabel("Subtitles") {
+            IconButton(onClick = { onOpen(true) }, modifier = Modifier.handCursor()) {
+                Icon(Icons.Filled.Subtitles, "Subtitles", tint = if (selected != null) PlayerAccent else Color.White)
+            }
         }
         DropdownMenu(open, { onOpen(false) }) {
             @Composable fun item(label: String, isSelected: Boolean, close: Boolean = true, onClick: () -> Unit) = DropdownMenuItem(

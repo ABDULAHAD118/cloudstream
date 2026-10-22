@@ -43,7 +43,7 @@ class VideoEngine : AutoCloseable {
 
     // CS_VLC_LOG=1 prints libVLC's own warnings and errors, for diagnosing streams that won't play
     private val nativeLog = if (System.getenv("CS_VLC_LOG") == "1") factory.application().newLog().apply {
-        level = uk.co.caprica.vlcj.log.LogLevel.WARNING
+        level = if (System.getenv("CS_VLC_DEBUG") == "1") uk.co.caprica.vlcj.log.LogLevel.DEBUG else uk.co.caprica.vlcj.log.LogLevel.WARNING
         addLogListener { level, module, _, _, _, _, _, message -> println("libvlc $level [$module] $message") }
     } else null
 
@@ -57,9 +57,15 @@ class VideoEngine : AutoCloseable {
         private set
     var buffering by mutableStateOf(true)
         private set
+    /** How full libVLC's buffer is while [buffering], 0-100. */
+    var bufferPercent by mutableIntStateOf(0)
+        private set
     var ended by mutableStateOf(false)
         private set
     var failed by mutableStateOf(false)
+        private set
+    /** The clock is moving after the resume seek; switching tracks before this sends HLS back to 0:00. */
+    var started by mutableStateOf(false)
         private set
     var rate by mutableFloatStateOf(1f)
         private set
@@ -118,7 +124,7 @@ class VideoEngine : AutoCloseable {
                 // seeking HLS on the "playing" event, before any frame, left it buffering forever
                 val seek = pendingSeek
                 if (seek > 0) { pendingSeek = 0; mediaPlayer.submit { mediaPlayer.controls().setTime(seek) }; return }
-                time = newTime; buffering = false
+                time = newTime; buffering = false; started = true
             }
             override fun lengthChanged(mediaPlayer: MediaPlayer, newLength: Long) { length = knownLength ?: newLength }
             override fun playing(mediaPlayer: MediaPlayer) {
@@ -126,7 +132,7 @@ class VideoEngine : AutoCloseable {
             }
             override fun paused(mediaPlayer: MediaPlayer) { playing = false }
             override fun stopped(mediaPlayer: MediaPlayer) { playing = false }
-            override fun buffering(mediaPlayer: MediaPlayer, newCache: Float) { buffering = newCache < 100f }
+            override fun buffering(mediaPlayer: MediaPlayer, newCache: Float) { bufferPercent = newCache.toInt(); buffering = newCache < 100f }
             override fun finished(mediaPlayer: MediaPlayer) { playing = false; ended = true }
             override fun error(mediaPlayer: MediaPlayer) {
                 if (nativeLog != null) println("libvlc error event while opening ${opened.take(80)}")
@@ -138,7 +144,7 @@ class VideoEngine : AutoCloseable {
     /** libVLC can only send Referer and User-Agent itself; [HeaderProxy] covers links that need more. */
     /** [audioUrl] is a separate audio stream to play alongside, for sites (YouTube) that serve video-only streams. */
     fun open(url: String, referer: String?, userAgent: String?, startAtMs: Long, audioUrl: String? = null, maxHeight: Int? = null) { // null maxHeight: adaptive
-        ended = false; failed = false; buffering = true; time = startAtMs; length = 0; knownLength = null; frame = null
+        ended = false; failed = false; started = false; buffering = true; bufferPercent = 0; time = startAtMs; length = 0; knownLength = null; frame = null
         opened = url
         opens++
         val options = listOfNotNull(
@@ -161,6 +167,8 @@ class VideoEngine : AutoCloseable {
     fun togglePause() = if (ended) player.controls().play() else player.controls().pause()
     fun seekTo(ms: Long) { player.controls().setTime(ms.coerceIn(0, maxOf(length - 1000, 0))); time = ms }
     fun skip(ms: Long) = seekTo(time + ms)
+    /** A live stream's clock runs past its length (DASH counts from 1970), so it's seeked without [seekTo]'s clamp. */
+    fun seekLive(ms: Long) { player.controls().setTime(ms); time = ms }
     fun setSpeed(value: Float) { rate = value; player.controls().setRate(value) }
     fun changeVolume(value: Int) { volume = value.coerceIn(0, 200); player.audio().setVolume(volume) }
 

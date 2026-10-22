@@ -2,6 +2,9 @@ package com.lagradost.cloudstream.mac
 
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.TooltipArea
+import androidx.compose.foundation.TooltipPlacement
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.background
@@ -57,7 +60,7 @@ private val TrackGrey = Color.White.copy(alpha = 0.3f)
 @Composable
 fun SeekBar(
     positionMs: Long, lengthMs: Long, onSeek: (Long) -> Unit, modifier: Modifier = Modifier,
-    preview: SeekPreview? = null, onActiveChange: (Boolean) -> Unit = {},
+    preview: SeekPreview? = null, onActiveChange: (Boolean) -> Unit = {}, label: (Long) -> String = ::formatTime,
 ) {
     val hover = remember { MutableInteractionSource() }
     val hovered by hover.collectIsHoveredAsState()
@@ -128,7 +131,7 @@ fun SeekBar(
                         if (thumbnail != null) Image(thumbnail, "Preview frame", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
                         else CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp)
                     }
-                    Text(formatTime(previewMs), color = Color.White, fontSize = 13.sp,
+                    Text(label(previewMs), color = Color.White, fontSize = 13.sp,
                         modifier = Modifier.padding(top = 4.dp).background(Color.Black.copy(alpha = 0.85f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 3.dp))
                 }
             }
@@ -154,11 +157,11 @@ fun VolumeControl(volume: Int, onVolume: (Int) -> Unit) {
     }
     val density = LocalDensity.current
     Box {
-        IconButton(onClick = { onVolume(if (volume == 0) 100 else 0) }, modifier = Modifier.hoverable(iconHover).handCursor()) {
-            Icon(
-                when { volume == 0 -> Icons.AutoMirrored.Filled.VolumeOff; volume < 50 -> Icons.AutoMirrored.Filled.VolumeDown; else -> Icons.AutoMirrored.Filled.VolumeUp },
-                "Volume", tint = Color.White,
-            )
+        // The volume bar opens above the icon, so its label goes to the side
+        HoverLabel(if (volume == 0) "Unmute (M)" else "Mute (M)", Alignment.CenterEnd) {
+            IconButton(onClick = { onVolume(if (volume == 0) 100 else 0) }, modifier = Modifier.hoverable(iconHover).handCursor()) {
+                Icon(volumeIcon(volume), "Volume", tint = Color.White)
+            }
         }
         if (open) Popup(offset = IntOffset(0, with(density) { (-150).dp.roundToPx() })) {
             var heightPx by remember { mutableStateOf(1) }
@@ -191,3 +194,18 @@ fun VolumeControl(volume: Int, onVolume: (Int) -> Unit) {
         }
     }
 }
+
+fun volumeIcon(volume: Int) =
+    when { volume == 0 -> Icons.AutoMirrored.Filled.VolumeOff; volume < 50 -> Icons.AutoMirrored.Filled.VolumeDown; else -> Icons.AutoMirrored.Filled.VolumeUp }
+
+/** A player button's name (and its key) on hover, like YouTube's. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun HoverLabel(label: String, side: Alignment = Alignment.TopCenter, content: @Composable () -> Unit) = TooltipArea(
+    tooltip = {
+        Text(label, color = Color.White, fontSize = 13.sp,
+            modifier = Modifier.background(Color(0xF0262626), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 4.dp))
+    },
+    // The button's 48 dp touch area already spaces the label off its 24 dp icon
+    delayMillis = 400, tooltipPlacement = TooltipPlacement.ComponentRect(side, side), content = content,
+)

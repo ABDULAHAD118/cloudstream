@@ -8,6 +8,9 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.fasterxml.jackson.annotation.JsonProperty
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.*
@@ -144,4 +147,27 @@ object SearchState {
             loadingMore -= row.api
         }
     }
+}
+
+/** Titles to suggest while typing, from TheMovieDB like the Android app's SearchSuggestionApi (same key). */
+object SearchSuggestions {
+    private data class Page(@JsonProperty("results") val results: List<Item>? = null)
+    private data class Item(
+        @JsonProperty("media_type") val mediaType: String? = null,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("name") val name: String? = null,
+    )
+
+    suspend fun get(query: String): List<String> {
+        if (query.length < 2) return emptyList()
+        val body = runCatching {
+            app.get("https://api.themoviedb.org/3/search/multi", params = mapOf(
+                "api_key" to "e6333b32409e02a4a6eba6fb7ff866bb", "query" to query, "language" to "en-US",
+            ), cacheTime = 60 * 24).text
+        }.getOrNull() ?: return emptyList() // offline: just no suggestions
+        return parse(body)
+    }
+
+    fun parse(json: String): List<String> = runCatching { parseJson(json, Page::class).results.orEmpty() }.getOrDefault(emptyList())
+        .filter { it.mediaType == "movie" || it.mediaType == "tv" }.mapNotNull { it.title ?: it.name }.distinct().take(10)
 }

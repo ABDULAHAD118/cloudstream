@@ -3,6 +3,8 @@ package com.lagradost.cloudstream.mac
 import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.newDrmExtractorLink
+import com.lagradost.cloudstream3.utils.CLEARKEY_UUID
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.test.Test
@@ -55,6 +57,17 @@ class PlayerTest {
         val h264 = newExtractorLink("YouTube", "H264", "https://x/videoplayback?itag=137&mime=video%2Fmp4", ExtractorLinkType.VIDEO) { quality = 1080; audioTracks = audio }
         val plain = newExtractorLink("Site", "file", "https://x/movie.webm", ExtractorLinkType.VIDEO) { quality = 720 }
         assertEquals(listOf("H264", "file", "VP9"), sortLinks(listOf(vp9, plain, h264), 2160).map { it.name })
+    }
+
+    @Test
+    fun drmComesLast() = runBlocking {
+        // LivXow's live events: ClearKey DASH next to plain HLS; libVLC shows DRM as a black picture
+        val drm = newDrmExtractorLink("LivXow", "SKY SPORTS FHD", "https://x/cenc.mpd", ExtractorLinkType.DASH, CLEARKEY_UUID) { quality = 1080 }
+        val hls = newExtractorLink("LivXow", "FORMULA 1", "https://x/index.m3u8", ExtractorLinkType.M3U8) { quality = 720 }
+        assertEquals(listOf("FORMULA 1", "SKY SPORTS FHD"), sortLinks(listOf(drm, hls), QualityPreference.AUTO).map { it.name })
+        // With its key, ClearKey plays (the proxy decrypts it) and ranks by quality like the rest
+        drm.key = "AAECAwQFBgcICQoLDA0ODw"
+        assertEquals(listOf("SKY SPORTS FHD", "FORMULA 1"), sortLinks(listOf(drm, hls), QualityPreference.AUTO).map { it.name })
     }
 
     @Test
