@@ -143,6 +143,8 @@ private fun CommunityReposTab(directory: List<DirectoryRepo>?) {
             if (directory == null) item { Hint("Loading…") }
             items(directory.orEmpty().filter { matches(query.trim(), it.name, it.url) }, key = { "community|${it.url}" }) { d ->
                 Row(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ExtensionIcon(d.iconUrl)
+                    Spacer(Modifier.width(14.dp))
                     Column(Modifier.weight(1f)) {
                         Text(d.name + if (d.verified) " ✓" else "", style = MaterialTheme.typography.bodyLarge)
                         Text(d.url, style = MaterialTheme.typography.bodySmall, color = secondaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)

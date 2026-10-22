@@ -35,7 +35,7 @@ data class SitePlugin(
 )
 
 data class RepoEntry(val name: String, val url: String, val iconUrl: String? = null)
-data class DirectoryRepo(val name: String, val url: String, val verified: Boolean)
+data class DirectoryRepo(val name: String, val url: String, val verified: Boolean, val iconUrl: String? = null)
 data class InstalledPlugin(val internalName: String, val name: String, val version: Int, val repoUrl: String, val iconUrl: String? = null)
 data class SavedState(val repos: List<RepoEntry> = emptyList(), val plugins: List<InstalledPlugin> = emptyList())
 
@@ -122,7 +122,7 @@ object Extensions {
         (directory + BUILTIN_REPOS.filter { b -> directory.none { it.first == b } }.map { it to false }).map { (url, verified) ->
             async {
                 withTimeoutOrNull(15_000) {
-                    runCatching { DirectoryRepo(parseJson(app.get(url).text, Repository::class).name, url, verified) }.getOrNull()
+                    runCatching { parseJson(app.get(url).text, Repository::class).let { DirectoryRepo(it.name, url, verified, it.iconUrl) } }.getOrNull()
                 }
             }
         }.awaitAll().filterNotNull().sortedWith(compareByDescending<DirectoryRepo> { it.verified }.thenBy { it.name.lowercase() })
