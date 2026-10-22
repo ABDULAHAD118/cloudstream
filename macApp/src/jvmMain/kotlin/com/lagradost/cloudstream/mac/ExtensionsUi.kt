@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -82,8 +83,8 @@ private val tasks = ExtensionTasks()
 
 @Composable
 private fun ExtensionsOverview(onOpenRepo: (String) -> Unit) {
-    var input by remember { mutableStateOf("") }
-    var query by remember { mutableStateOf("") }
+    // Repo pages open from Installed repos, so coming back lands there again
+    var tab by remember { mutableStateOf(1) }
     var directory by remember { mutableStateOf<List<DirectoryRepo>?>(null) }
     var reload by remember { mutableStateOf(0) }
     tasks.version // re-read state after installs and removals
@@ -94,11 +95,9 @@ private fun ExtensionsOverview(onOpenRepo: (String) -> Unit) {
         directory = null
         directory = runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { Extensions.communityRepos() } }.getOrDefault(emptyList())
     }
-    val q = query.trim()
     val updates = installed.filter { p -> (RepoPlugins.latest(p)?.version ?: 0) > p.version }
-    fun addRepo(url: String) = tasks.run("Adding repository") { val entry = Extensions.addRepo(url); RepoPlugins.refresh(entry.url); input = "" }
 
-    // The header stays put; below it your repositories, then the community list, each scrolling on its own
+    // The header and tabs stay put; each tab scrolls on its own
     Column(Modifier.fillMaxSize()) {
         LargeTitle("Extensions") {
             ReloadButton { reload++; repos.forEach { RepoPlugins.refresh(it.url) } }
@@ -108,72 +107,99 @@ private fun ExtensionsOverview(onOpenRepo: (String) -> Unit) {
                 }
             }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Update, null); Spacer(Modifier.width(6.dp)); Text(if (updates.isEmpty()) "Up to date" else "Update all (${updates.size})") }
         }
-        Column(Modifier.padding(horizontal = 32.dp)) {
-            Text("Extensions are the same files the Android app uses. Add a repository by link, or pick one from the community list below.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 12.dp)) {
-                OutlinedTextField(input, { input = it }, label = { Text("Repository URL (repo.json, GitHub project or cloudstreamrepo:// link)") },
-                    singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { if (input.isNotBlank()) addRepo(input) }), modifier = Modifier.weight(1f))
-                Spacer(Modifier.width(12.dp))
-                Button(enabled = input.isNotBlank() && tasks.busy == null, onClick = { addRepo(input) }, modifier = Modifier.handCursor()) { Text("Add") }
+        Text("Extensions are the same files the Android app uses. Add a repository from the community list or by link, then install its extensions.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 32.dp))
+        PrimaryScrollableTabRow(selectedTabIndex = tab, edgePadding = 16.dp, containerColor = Color.Transparent, modifier = Modifier.padding(top = 8.dp)) {
+            listOf("Community repos", "Installed repos (${repos.size})", "Installed extensions (${installed.size})").forEachIndexed { i, title ->
+                Tab(selected = tab == i, onClick = { tab = i }, text = { Text(title) }, modifier = Modifier.handCursor())
             }
-            OutlinedTextField(query, { query = it }, placeholder = { Text("Search repositories and extensions") },
-                leadingIcon = { Icon(Icons.Filled.Search, null) },
-                trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { query = "" }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Clear, "Clear search") } },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
+        }
+        Column(Modifier.padding(horizontal = 32.dp)) {
             tasks.busy?.let { Text("$it…", Modifier.padding(top = 8.dp)); LinearProgressIndicator(Modifier.fillMaxWidth()) }
             tasks.message?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
         }
-        BoxWithConstraints(Modifier.fillMaxSize().padding(top = 8.dp)) {
-            // Your part is only as tall as its content, up to half; the community list takes the rest
-            val half = maxHeight / 2
-            Column(Modifier.fillMaxSize()) {
-                LazyColumn(Modifier.heightIn(max = half).fillMaxWidth(), contentPadding = PaddingValues(bottom = 16.dp)) {
-                    val shownRepos = repos.filter { matches(q, it.name, it.url) }
-                    item { SectionTitle(if (q.isEmpty()) "Repositories" else "Repositories (${shownRepos.size})") }
-                    if (shownRepos.isEmpty()) item { Hint(if (q.isEmpty()) "No repositories added." else "No repositories match.") }
-                    items(shownRepos, key = { it.url }) { repo -> RepoCard(repo) { onOpenRepo(repo.url) } }
+        when (tab) {
+            0 -> CommunityReposTab(directory)
+            1 -> InstalledReposTab(onOpenRepo)
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 8.dp, bottom = 32.dp)) {
+                if (installed.isEmpty()) item { Hint("No extensions installed. Install them from a repository under Installed repos.") }
+                items(installed, key = { "installed|${it.internalName}" }) { p -> InstalledRow(p) }
+            }
+        }
+    }
+}
 
-                    // While searching, extensions from every repository too, ready to install
-                    if (q.isNotEmpty()) {
-                        val found = repos.flatMap { repo ->
-                            filterPlugins(RepoPlugins.lists[repo.url].orEmpty(), emptySet(), null, "")
-                                .filter { matches(q, it.name, it.internalName, it.description, it.language, it.tvTypes?.joinToString(), it.authors.joinToString()) }
-                                .map { repo to it }
-                        }
-                        item { SectionTitle("Extensions (${found.size})") }
-                        if (found.isEmpty()) item { Hint("No extensions match.") }
-                        items(found.take(150), key = { (repo, p) -> "found|${repo.url}|${p.internalName}" }) { (repo, p) -> PluginRow(p, repo.url, repoName = repo.name) }
-                    }
+private fun addRepo(url: String, then: () -> Unit = {}) =
+    tasks.run("Adding repository") { val entry = Extensions.addRepo(url); RepoPlugins.refresh(entry.url); then() }
 
-                    val shownInstalled = installed.filter { matches(q, it.name, it.internalName) }
-                    item { SectionTitle("Installed (${installed.size})") }
-                    if (shownInstalled.isEmpty()) item { Hint(if (q.isEmpty()) "No extensions installed." else "No installed extensions match.") }
-                    items(shownInstalled, key = { "installed|${it.internalName}" }) { p -> InstalledRow(p) }
-                }
-                HorizontalDivider(Modifier.padding(horizontal = 32.dp))
-                LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(bottom = 32.dp)) {
-                    val community = directory.orEmpty().filter { d -> repos.none { it.url == d.url } && matches(q, d.name, d.url) }
-                    item {
-                        Text("Community repositories", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(start = 32.dp, end = 32.dp, top = 16.dp, bottom = 6.dp))
-                        if (directory == null) Text("Loading…", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 32.dp))
+@Composable
+private fun CommunityReposTab(directory: List<DirectoryRepo>?) {
+    var query by remember { mutableStateOf("") }
+    tasks.version
+    val repos = Extensions.state.repos
+    Column(Modifier.fillMaxSize()) {
+        SearchField(query, { query = it }, "Search community repositories")
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+            if (directory == null) item { Hint("Loading…") }
+            items(directory.orEmpty().filter { matches(query.trim(), it.name, it.url) }, key = { "community|${it.url}" }) { d ->
+                Row(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ExtensionIcon(d.iconUrl)
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(d.name + if (d.verified) " ✓" else "", style = MaterialTheme.typography.bodyLarge)
+                        Text(d.url, style = MaterialTheme.typography.bodySmall, color = secondaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    items(community, key = { "community|${it.url}" }) { d ->
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(d.name + if (d.verified) " ✓" else "", style = MaterialTheme.typography.bodyLarge)
-                                Text(d.url, style = MaterialTheme.typography.bodySmall, color = secondaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                            TextButton(enabled = tasks.busy == null, onClick = { addRepo(d.url) }, modifier = Modifier.handCursor()) { Text("Add") }
-                        }
-                    }
+                    if (repos.any { it.url == d.url }) TextButton(enabled = false, onClick = {}) { Text("Added") }
+                    else TextButton(enabled = tasks.busy == null, onClick = { addRepo(d.url) }, modifier = Modifier.handCursor()) { Text("Add") }
                 }
             }
         }
     }
 }
+
+@Composable
+private fun InstalledReposTab(onOpenRepo: (String) -> Unit) {
+    var input by remember { mutableStateOf("") }
+    var types by remember { mutableStateOf(emptySet<com.lagradost.cloudstream3.TvType>()) }
+    var language by remember { mutableStateOf<String?>(null) }
+    var query by remember { mutableStateOf("") }
+    tasks.version
+    val repos = Extensions.state.repos
+    val all = repos.flatMap { repo -> RepoPlugins.lists[repo.url].orEmpty().map { repo to it } }
+    val shown = filterPlugins(all.map { it.second }, types, language, query).toSet()
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 32.dp, vertical = 12.dp)) {
+                OutlinedTextField(input, { input = it }, label = { Text("Repository URL (repo.json, GitHub project or cloudstreamrepo:// link)") },
+                    singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { if (input.isNotBlank()) addRepo(input) { input = "" } }), modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(12.dp))
+                Button(enabled = input.isNotBlank() && tasks.busy == null, onClick = { addRepo(input) { input = "" } }, modifier = Modifier.handCursor()) { Text("Add") }
+            }
+        }
+        if (repos.isEmpty()) item { Hint("No repositories added. Pick one under Community repos, or paste a link above.") }
+        items(repos, key = { it.url }) { repo -> RepoCard(repo) { onOpenRepo(repo.url) } }
+        if (repos.isNotEmpty()) {
+            item {
+                SectionTitle("Extensions (${shown.size})")
+                Column(Modifier.padding(horizontal = 32.dp)) {
+                    PluginFilters(all.map { it.second }, types, { types = it }, language, { language = it }, query, { query = it })
+                }
+            }
+            if (shown.isEmpty()) item { Hint(if (all.isEmpty()) "Loading…" else "No extensions match.") }
+            items(all.filter { it.second in shown }.sortedBy { it.second.name.lowercase() }, key = { (repo, p) -> "found|${repo.url}|${p.internalName}" }) { (repo, p) ->
+                PluginRow(p, repo.url, repoName = repo.name.takeIf { repos.size > 1 })
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchField(query: String, onQuery: (String) -> Unit, placeholder: String) =
+    OutlinedTextField(query, onQuery, placeholder = { Text(placeholder) },
+        leadingIcon = { Icon(Icons.Filled.Search, null) },
+        trailingIcon = { if (query.isNotEmpty()) IconButton(onClick = { onQuery("") }, modifier = Modifier.handCursor()) { Icon(Icons.Filled.Clear, "Clear search") } },
+        singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 12.dp))
 
 /** True when every word of the query appears in at least one of the fields. Blank matches all. */
 private fun matches(query: String, vararg fields: String?): Boolean {
