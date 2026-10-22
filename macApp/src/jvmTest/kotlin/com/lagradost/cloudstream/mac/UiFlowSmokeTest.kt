@@ -130,7 +130,13 @@ class UiFlowSmokeTest {
             install("YoutubeProvider")
             onNodeWithText("Search extensions").performTextClearance()
             onNodeWithContentDescription("Back").performClick()
-            waitForText("Installed (2)"); shot("04-installed")
+            // Community repos: the built-in list, with the official repo marked as added
+            onNodeWithText("Community repos").performClick()
+            waitForText("Added")
+            onNodeWithText("Search community repositories").performTextInput("netmirror")
+            waitForText("NetMirror"); shot("04a-community-repos")
+            onNodeWithText("Installed extensions", substring = true).performClick()
+            waitForText("Installed extensions (2)"); waitForText("Internet Archive"); shot("04-installed")
             assertTrue(Extensions.loadErrors.isEmpty(), "load errors: ${Extensions.loadErrors}")
             assertTrue(Providers.list.any { it.name == "Internet Archive" } && Providers.list.any { it.name == "YouTube" })
 
@@ -266,9 +272,10 @@ class UiFlowSmokeTest {
 
             // Uninstall from the Installed list
             start = listOf(Screen.ExtensionsTab)
-            waitForText("Installed (2)")
+            onNodeWithText("Installed extensions", substring = true).performClick()
+            waitForText("Installed extensions (2)")
             onNode(hasContentDescription("Remove") and hasAnyAncestor(hasTestTag("installed-YoutubeProvider"))).performClick()
-            waitForText("Installed (1)"); shot("16-uninstalled")
+            waitForText("Installed extensions (1)"); shot("16-uninstalled")
             assertTrue(Providers.list.none { it.name == "YouTube" })
         }
     }

@@ -54,6 +54,11 @@ object Extensions {
     const val OFFICIAL_REPO = "https://raw.githubusercontent.com/recloudstream/extensions/master/repo.json"
     // The community repository list that the Android setup screen links to
     private const val REPO_DIRECTORY = "https://raw.githubusercontent.com/recloudstream/cs-repos/master/repos-db.json"
+    // Well-known repos missing from that list (checked to load, Oct 2026)
+    private val BUILTIN_REPOS = listOf(
+        "https://raw.githubusercontent.com/Sushan64/NetMirror-Extension/refs/heads/builds/Netflix.json",
+        "https://raw.githubusercontent.com/keyiflerolsun/Kekik-cloudstream/master/repo.json",
+    )
 
     // First launch starts with the official repo so the Extensions tab isn't empty
     var state: SavedState = runCatching { parseJson(stateFile.readText(), SavedState::class) }
@@ -107,13 +112,14 @@ object Extensions {
     /** Community repos with their names; repos that no longer respond are left out. */
     suspend fun communityRepos(): List<DirectoryRepo> = coroutineScope {
         // Entries are either a bare URL or {"url": ..., "verified": true}
-        parseJson(app.get(REPO_DIRECTORY).text, Array<Any>::class).mapNotNull { entry ->
+        val directory = runCatching { parseJson(app.get(REPO_DIRECTORY).text, Array<Any>::class) }.getOrDefault(emptyArray()).mapNotNull { entry ->
             when (entry) {
                 is String -> entry to false
                 is Map<*, *> -> (entry["url"] as? String ?: return@mapNotNull null) to (entry["verified"] == true)
                 else -> null
             }
-        }.map { (url, verified) ->
+        }
+        (directory + BUILTIN_REPOS.filter { b -> directory.none { it.first == b } }.map { it to false }).map { (url, verified) ->
             async {
                 withTimeoutOrNull(15_000) {
                     runCatching { DirectoryRepo(parseJson(app.get(url).text, Repository::class).name, url, verified) }.getOrNull()
