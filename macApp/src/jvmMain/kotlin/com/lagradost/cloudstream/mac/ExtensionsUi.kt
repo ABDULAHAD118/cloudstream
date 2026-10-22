@@ -30,7 +30,8 @@ object RepoPlugins {
     val loading = mutableStateListOf<String>()
 
     fun refresh(url: String) {
-        if (url in loading) return
+        // The offline bar explains why nothing loads; don't turn every row into an error
+        if (!Network.online || url in loading) return
         loading += url; errors.remove(url)
         AppScope.launch {
             runCatching { Extensions.listPlugins(url) }
@@ -90,9 +91,11 @@ private fun ExtensionsOverview(onOpenRepo: (String) -> Unit) {
     tasks.version // re-read state after installs and removals
     val repos = Extensions.state.repos
     val installed = Extensions.state.plugins
-    LaunchedEffect(repos) { RepoPlugins.loadMissing() }
-    LaunchedEffect(reload) {
+    LaunchedEffect(repos, Network.online) { if (Network.online) RepoPlugins.loadMissing() }
+    LaunchedEffect(reload, Network.online) {
         directory = null
+        // The community list comes from GitHub; offline, say so instead of failing 15 s later
+        if (!Network.online) return@LaunchedEffect
         directory = runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { Extensions.communityRepos() } }.getOrDefault(emptyList())
     }
     val updates = installed.filter { p -> (RepoPlugins.latest(p)?.version ?: 0) > p.version }
@@ -140,7 +143,12 @@ private fun CommunityReposTab(directory: List<DirectoryRepo>?) {
     Column(Modifier.fillMaxSize()) {
         SearchField(query, { query = it }, "Search community repositories")
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
-            if (directory == null) item { Hint("Loading…") }
+            if (directory == null) item {
+                Hint(
+                    if (!Network.online) "You're offline — the community list needs an internet connection. Installed extensions still work."
+                    else "Loading…"
+                )
+            }
             items(directory.orEmpty().filter { matches(query.trim(), it.name, it.url) }, key = { "community|${it.url}" }) { d ->
                 Row(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     ExtensionIcon(d.iconUrl)
@@ -229,6 +237,7 @@ private fun RepoCard(repo: RepoEntry, onClick: () -> Unit) {
                     when {
                         repo.url in RepoPlugins.loading -> "Loading…"
                         error != null -> error
+                        !Network.online && RepoPlugins.lists[repo.url] == null -> "You're offline — the list loads when you reconnect"
                         else -> "${RepoPlugins.lists[repo.url]?.size ?: 0} extensions · ${repo.url}"
                     },
                     style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -279,7 +288,7 @@ private fun RepositoryScreen(repo: RepoEntry, onBack: () -> Unit) {
     var types by remember { mutableStateOf(emptySet<com.lagradost.cloudstream3.TvType>()) }
     var language by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
-    LaunchedEffect(repo.url) { if (repo.url !in RepoPlugins.lists) RepoPlugins.refresh(repo.url) }
+    LaunchedEffect(repo.url, Network.online) { if (Network.online && repo.url !in RepoPlugins.lists) RepoPlugins.refresh(repo.url) }
     val plugins = RepoPlugins.lists[repo.url]
     val error = RepoPlugins.errors[repo.url]
     Column(Modifier.fillMaxSize()) {
@@ -297,6 +306,8 @@ private fun RepositoryScreen(repo: RepoEntry, onBack: () -> Unit) {
             tasks.message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
         when {
+            !Network.online && plugins == null -> MessageBox("You're offline",
+                "This repository's extension list needs an internet connection. Installed extensions still work.", "Try again") { Network.refresh() }
             plugins == null && error != null -> MessageBox("Couldn't load repository", error, "Try again") { RepoPlugins.refresh(repo.url) }
             plugins == null -> LoadingBox()
             else -> LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {

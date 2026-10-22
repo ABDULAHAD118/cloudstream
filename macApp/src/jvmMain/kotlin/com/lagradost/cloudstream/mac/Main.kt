@@ -113,6 +113,8 @@ fun main() {
 
 private fun app() = application {
     LaunchedEffect(Unit) {
+        // Watches the connection, so screens can say "You're offline" instead of spinning
+        Network.start()
         // Warm up the player engine now, so the first Play doesn't wait for libVLC to start
         AppScope.launch { VideoEngine.shared() }
         if (AppSettings.autoUpdate) AppScope.launch { Updater.check() }
@@ -133,6 +135,8 @@ private fun app() = application {
 
 @Composable
 fun App(start: List<Screen> = listOf(Home)) {
+    // Before the first poster: keeps what has been seen on disk for when there's no connection
+    InstallImageCache()
     val stack = remember { start.toMutableStateList() }
     Toasts.current?.let { message ->
         LaunchedEffect(message) { delay(3500); if (Toasts.current == message) Toasts.current = null }
@@ -168,20 +172,46 @@ private fun AppContent(stack: SnapshotStateList<Screen>) {
         Library.record(HistoryEntry(api.name, parent.url, parent.name, parent.posterUrl, current.items, index, position, length))
     }) { stack.removeLast() }
 
-    Row(Modifier.fillMaxSize()) {
-        Sidebar(stack.first(), ::tab)
-        Box(Modifier.weight(1f).fillMaxHeight()) {
-            when (current) {
-                Home -> HomeScreen(::open)
-                Search -> SearchScreen(::open)
-                LibraryTab -> LibraryScreen(::open)
-                ExtensionsTab -> ExtensionsScreen()
-                SettingsTab -> SettingsScreen()
-                DownloadsTab -> Column { LargeTitle("Downloads"); Column(Modifier.padding(horizontal = 32.dp)) { DownloadsScreen { open(Play(null, listOf(it), 0)) } } }
-                is Result -> ResultScreen(current, ::open) { stack.removeLast() }
-                is Play -> Unit
+    Column(Modifier.fillMaxSize()) {
+        OfflineBar()
+        Row(Modifier.weight(1f).fillMaxWidth()) {
+            Sidebar(stack.first(), ::tab)
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                when (current) {
+                    Home -> HomeScreen(::open)
+                    Search -> SearchScreen(::open)
+                    LibraryTab -> LibraryScreen(::open)
+                    ExtensionsTab -> ExtensionsScreen()
+                    SettingsTab -> SettingsScreen()
+                    DownloadsTab -> Column { LargeTitle("Downloads"); Column(Modifier.padding(horizontal = 32.dp)) { DownloadsScreen { open(Play(null, listOf(it), 0)) } } }
+                    is Result -> ResultScreen(current, ::open) { stack.removeLast() }
+                    is Play -> Unit
+                }
+                if (Providers.loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
             }
-            if (Providers.loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
+        }
+    }
+}
+
+/** A slim strip above the window when there's no connection; the player still gets the whole screen. */
+@Composable
+private fun OfflineBar() {
+    AnimatedVisibility(!Network.online, enter = fadeIn(), exit = fadeOut()) {
+        Row(
+            Modifier.fillMaxWidth().background(Color(0xFF3A2C00)).padding(start = 20.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.CloudOff, null, tint = Color(0xFFFFD54F), modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(10.dp))
+            Text("You're offline — Downloads and your Library still work.", color = Color(0xFFFFE082), style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = { Network.refresh() },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                modifier = Modifier.height(26.dp).handCursor(),
+            ) {
+                Text("Try again", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
@@ -301,15 +331,19 @@ private fun HeroText(api: MainAPI, item: HeroItem, open: (Screen) -> Unit) {
 fun HomeScreen(open: (Screen) -> Unit) {
     val providers = Providers.list.filter { it.hasMainPage }
     val selected = providers.firstOrNull { it.name == HomeState.selectedName } ?: providers.firstOrNull()
-    LaunchedEffect(selected) { selected?.let(HomeState::show) }
+    // Offline, there's nothing to fetch; the last page stays on screen, and it reloads when the connection returns
+    LaunchedEffect(selected, Network.online) { if (Network.online) selected?.let(HomeState::show) }
     val continueWatching = Library.continueWatching
 
     if (providers.isEmpty() && continueWatching.isEmpty()) {
         Column(Modifier.fillMaxSize()) {
             LargeTitle("Home")
-            if (Providers.loading) LoadingBox(text = "Loading extensions…")
-            else MessageBox("No extensions yet", "CloudStream doesn't include any content. Add a repository and install extensions to start browsing.",
-                "Open Extensions") { open(ExtensionsTab) }
+            when {
+                !Network.online -> MessageBox("You're offline", "Home needs an internet connection. Downloads and your Library still work.")
+                Providers.loading -> LoadingBox(text = "Loading extensions…")
+                else -> MessageBox("No extensions yet", "CloudStream doesn't include any content. Add a repository and install extensions to start browsing.",
+                    "Open Extensions") { open(ExtensionsTab) }
+            }
         }
         return
     }
@@ -320,6 +354,10 @@ fun HomeScreen(open: (Screen) -> Unit) {
             else item(key = "title") { LargeTitle("Home") }
             if (continueWatching.isNotEmpty()) item(key = "continue") { ContinueWatchingRow(continueWatching, open) }
             when {
+                !Network.online && rows.isEmpty() && !HomeState.loading -> item {
+                    MessageBox("You're offline", "Home needs an internet connection. Downloads and your Library still work.",
+                        "Try again", Modifier.fillMaxWidth()) { Network.refresh() }
+                }
                 HomeState.loading && rows.isEmpty() -> item { LoadingBox(Modifier.fillMaxWidth().padding(64.dp), "Loading ${selected?.name}…") }
                 HomeState.error != null && rows.isEmpty() -> item {
                     MessageBox("Couldn't load ${selected?.name}", HomeState.error, "Try again", Modifier.fillMaxWidth()) { selected?.let(HomeState::load) }
@@ -348,10 +386,10 @@ fun SearchScreen(open: (Screen) -> Unit) {
     val focus = remember { FocusRequester() }
     // Suggestions while typing, 300 ms after the last key; a new key cancels the old lookup
     var suggestions by remember { mutableStateOf(listOf<String>()) }
-    LaunchedEffect(SearchState.query) {
+    LaunchedEffect(SearchState.query, Network.online) {
         val q = SearchState.query.trim()
         suggestions = emptyList()
-        if (q == SearchState.searched) return@LaunchedEffect
+        if (!Network.online || q == SearchState.searched) return@LaunchedEffect
         delay(300)
         suggestions = SearchSuggestions.get(q)
     }
@@ -389,6 +427,8 @@ fun SearchScreen(open: (Screen) -> Unit) {
         NoProviders()
         if (SearchState.searching) LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 8.dp))
         when {
+            !Network.online && SearchState.searched.isEmpty() ->
+                MessageBox("Search needs an internet connection", "Downloads and your Library still work while you're offline.")
             !SearchState.searching && SearchState.results.isEmpty() && SearchState.searched.isNotEmpty() ->
                 MessageBox("No results for “${SearchState.searched}”")
             SearchState.searched.isEmpty() && Providers.list.isNotEmpty() ->

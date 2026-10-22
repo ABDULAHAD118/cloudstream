@@ -62,6 +62,11 @@ import coil3.compose.AsyncImagePainter
 import coil3.compose.rememberAsyncImagePainter
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
+import coil3.compose.setSingletonImageLoaderFactory
+import coil3.ImageLoader
+import coil3.disk.DiskCache
+import okio.Path.Companion.toPath
+import java.io.File
 import coil3.network.NetworkHeaders
 import coil3.network.httpHeaders
 import coil3.request.ImageRequest
@@ -69,6 +74,20 @@ import coil3.request.crossfade
 import com.lagradost.cloudstream3.SearchResponse
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+
+/**
+ * Posters and backdrops go to a 512 MB disk cache, so anything seen once still has its artwork offline:
+ * the Library, Downloads and Continue watching keep their pictures with no connection.
+ */
+@Composable
+fun InstallImageCache() {
+    val directory = remember { File(Extensions.dataDir, "cache/images").apply { mkdirs() }.absolutePath.toPath() }
+    setSingletonImageLoaderFactory { context ->
+        ImageLoader.Builder(context)
+            .diskCache(DiskCache.Builder().directory(directory).maxSizeBytes(512L * 1024 * 1024).build())
+            .build()
+    }
+}
 
 /** Everything a poster card needs, whether it comes from a provider, a bookmark or history. */
 data class PosterItem(

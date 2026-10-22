@@ -56,7 +56,10 @@ object HomeState {
 
     fun load(api: MainAPI) {
         job?.cancel()
-        rows = emptyList(); hero = emptyList(); error = null; loading = true; loadedFor = api.name
+        rows = emptyList(); hero = emptyList(); error = null
+        // Nothing to fetch without a connection; Home says so, and loads when the connection is back
+        if (!Network.online) { loading = false; loadedFor = null; return }
+        loading = true; loadedFor = api.name
         job = AppScope.launch {
             api.mainPage.map { page ->
                 async {
@@ -88,7 +91,7 @@ object HomeState {
     }
 
     fun loadMore(api: MainAPI, row: HomeRow) {
-        if (row.request in loadingMore) return
+        if (!Network.online || row.request in loadingMore) return
         loadingMore += row.request
         AppScope.launch {
             runCatching { api.getMainPage(row.nextPage, row.request) }
@@ -114,6 +117,7 @@ object SearchState {
 
     fun search(providers: List<MainAPI>) {
         val q = query.trim().takeIf { it.isNotEmpty() } ?: return
+        if (!Network.online) { Toasts.show("You're offline — search needs an internet connection"); return }
         job?.cancel()
         searched = q; results = emptyList(); searching = true
         job = AppScope.launch {
@@ -131,7 +135,7 @@ object SearchState {
     }
 
     fun loadMore(row: SearchRow) {
-        if (row.api in loadingMore) return
+        if (!Network.online || row.api in loadingMore) return
         loadingMore += row.api
         val q = searched
         AppScope.launch {

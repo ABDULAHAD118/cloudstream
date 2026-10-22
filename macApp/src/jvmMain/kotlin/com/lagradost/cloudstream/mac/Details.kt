@@ -51,8 +51,10 @@ fun ResultScreen(screen: Screen.Result, open: (Screen) -> Unit, back: () -> Unit
     var imdb by remember(screen) { mutableStateOf<ImdbInfo?>(null) }
     var reviews by remember(screen) { mutableStateOf<ImdbReviewPage?>(null) }
     var showReviews by remember(screen) { mutableStateOf(false) }
-    LaunchedEffect(screen, reload) {
+    LaunchedEffect(screen, reload, Network.online) {
         response = null; error = null
+        // Don't wait on a provider timeout when there's no connection; the page reopens when one is back
+        if (!Network.online) { error = "offline"; return@LaunchedEffect }
         withContext(Dispatchers.IO) {
             runCatching { screen.api.load(screen.url) }
                 .onSuccess { if (it == null) error = "Provider returned nothing" else response = it }
@@ -68,6 +70,8 @@ fun ResultScreen(screen: Screen.Result, open: (Screen) -> Unit, back: () -> Unit
     Box(Modifier.fillMaxSize()) {
         val res = response
         when {
+            error != null && !Network.online -> MessageBox("You're offline",
+                "Opening a title needs an internet connection. Downloads and your Library still work.", "Try again") { Network.refresh() }
             error != null -> MessageBox("Couldn't open ${screen.name}", error, "Try again") { reload++ }
             res == null -> LoadingBox(text = "Loading ${screen.name}")
             else -> Details(screen, res, imdb, reviews, open, { reload++ }, { showReviews = true })

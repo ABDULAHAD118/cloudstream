@@ -245,9 +245,25 @@ class UiFlowSmokeTest {
             waitForPlayback("12d-offline-playback")
             onNodeWithContentDescription("Back").performClick()
             waitForText("Show in Finder")
+
+            // No connection: the bar appears, and the same download still plays from disk
+            Network.pin(false)
+            try {
+                waitForText("You're offline")
+                onNodeWithText("Home").performClick()
+                waitForText("You're offline")
+                onNodeWithText("Downloads").performClick()
+                waitForText("Show in Finder")
+                onAllNodesWithText("Play").onFirst().performClick()
+                waitForPlayback("12e-offline-download-playback")
+                onNodeWithContentDescription("Back").performClick()
+                waitForText("Show in Finder")
+            } finally {
+                Network.pin(null)
+            }
+
             onAllNodesWithContentDescription("Delete").onFirst().performClick()
             waitUntil { Downloads.items.none { it.id == ours } }
-
             // A series: episodes list, then Next episode inside the player
             val series = runBlocking {
                 // YouTube labels every hit "Others"; channels load as series, so check what each one loads as

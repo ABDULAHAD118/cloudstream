@@ -1,6 +1,7 @@
 package com.lagradost.cloudstream.mac
 
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.snapshotFlow
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.USER_AGENT
 import com.lagradost.cloudstream3.app
@@ -225,6 +226,7 @@ object Downloads {
     fun limitChanged() = startNext()
 
     @Synchronized private fun startNext() {
+        if (!Network.online) return // queued downloads wait for the connection instead of failing
         while (jobs.size < AppSettings.parallelDownloads) {
             val next = items.lastOrNull { it.status == DownloadStatus.Queued } ?: return // oldest first
             update(next.id) { it.copy(status = DownloadStatus.Downloading, error = null) }
@@ -492,7 +494,14 @@ object Downloads {
     }
 
     // Placed last, so everything above is set up before the downloads interrupted by quitting start again
-    init { AppScope.launch { startNext(); items.toList().forEach { hideRedundantSubtitles(it.id) } } }
+    init {
+        AppScope.launch {
+            // Wait for the first connection check: an offline launch must not fail downloads queued when it last quit
+            Network.awaitFirstCheck()
+            snapshotFlow { Network.online }.collect { if (it) startNext() }
+        }
+        AppScope.launch { items.toList().forEach { hideRedundantSubtitles(it.id) } }
+    }
 }
 
 /**

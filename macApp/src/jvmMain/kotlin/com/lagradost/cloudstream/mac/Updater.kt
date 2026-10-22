@@ -58,6 +58,7 @@ object Updater {
     }
 
     suspend fun check() = withContext(Dispatchers.IO) {
+        if (!Network.online) return@withContext run { status = "You're offline — connect to check for updates" }
         val installed = currentVersion ?: return@withContext run { status = "Updates work in the installed app only" }
         if (checking || ready != null) return@withContext
         checking = true
