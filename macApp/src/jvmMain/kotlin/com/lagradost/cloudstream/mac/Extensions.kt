@@ -52,6 +52,14 @@ object Extensions {
     private val stateFile = File(dataDir, "state.json")
 
     const val OFFICIAL_REPO = "https://raw.githubusercontent.com/recloudstream/extensions/master/repo.json"
+
+    // The extension this fork ships with — CNC Verse (movies, series and live channels) — so a fresh app has content
+    private const val BUNDLED_PLUGIN = "CNC Verse"
+    private const val BUNDLED_VERSION = 115
+    private const val CNC_REPO = "https://raw.githubusercontent.com/NivinCNC/CNCVerse-Cloud-Stream-Extension/refs/heads/builds/CNC.json"
+    private const val CNC_REPO_NAME = "CNC Repo(All Language)"
+    private const val CNC_ICON = "https://github.com/NivinCNC/CNCVerse-Cloud-Stream-Extension/raw/refs/heads/master/Logos/CNC%20Verse/icon.png"
+
     // The community repository list that the Android setup screen links to
     private const val REPO_DIRECTORY = "https://raw.githubusercontent.com/recloudstream/cs-repos/master/repos-db.json"
     // Well-known repos missing from that list (checked to load, Oct 2026)
@@ -173,6 +181,30 @@ object Extensions {
     }
 
     fun loadAll() = state.plugins.forEach { load(it.internalName) }
+
+    /**
+     * Installs the extension this build ships with, once per data folder, before the plugins are loaded.
+     * The marker makes a later removal final: it isn't put back on the next launch.
+     */
+    fun seedBundled() = seedBundled(pluginDir, File(dataDir, "bundled-extension"), state)?.let { save(it) }
+
+    internal fun seedBundled(pluginDir: File, marker: File, state: SavedState): SavedState? {
+        if (marker.exists()) return null
+        val file = File(pluginDir, "$BUNDLED_PLUGIN.cs3")
+        if (!file.exists()) {
+            // Copied from the app's own resources, so this works on a first launch with no connection
+            val bytes = Extensions::class.java.getResourceAsStream("/bundled/cnc-verse.cs3")?.use { it.readBytes() } ?: return null
+            file.parentFile?.mkdirs()
+            file.writeBytes(bytes)
+        }
+        marker.writeText("$BUNDLED_PLUGIN $BUNDLED_VERSION\n")
+        return state.copy(
+            repos = state.repos.filter { it.url != CNC_REPO } + RepoEntry(CNC_REPO_NAME, CNC_REPO),
+            // Someone who installed it from the repo already keeps their (possibly newer) entry
+            plugins = if (state.plugins.any { it.internalName == BUNDLED_PLUGIN }) state.plugins
+            else state.plugins + InstalledPlugin(BUNDLED_PLUGIN, BUNDLED_PLUGIN, BUNDLED_VERSION, CNC_REPO, CNC_ICON),
+        )
+    }
 
     private fun load(internalName: String) {
         val cs3 = cs3(internalName)

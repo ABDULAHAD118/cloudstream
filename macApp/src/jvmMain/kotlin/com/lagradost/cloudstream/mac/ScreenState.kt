@@ -15,6 +15,12 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.*
 
+/** Home's provider: the one picked last time, else Netflix (what this fork opens on), else the first. */
+fun homeProvider(providers: List<MainAPI>, remembered: String?): MainAPI? =
+    providers.firstOrNull { it.name == remembered }
+        ?: providers.firstOrNull { it.name.equals("Netflix", true) }
+        ?: providers.firstOrNull()
+
 /** Work that must outlive the screen that started it (leaving Home mid-load shouldn't cancel the load). */
 val AppScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 

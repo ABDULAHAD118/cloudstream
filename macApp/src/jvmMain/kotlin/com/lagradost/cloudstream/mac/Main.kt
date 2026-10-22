@@ -119,6 +119,7 @@ private fun app() = application {
         AppScope.launch { VideoEngine.shared() }
         if (AppSettings.autoUpdate) AppScope.launch { Updater.check() }
         withContext(Dispatchers.IO) {
+            Extensions.seedBundled()
             Extensions.loadAll()
             APIHolder.initAll()
         }
@@ -330,7 +331,7 @@ private fun HeroText(api: MainAPI, item: HeroItem, open: (Screen) -> Unit) {
 @Composable
 fun HomeScreen(open: (Screen) -> Unit) {
     val providers = Providers.list.filter { it.hasMainPage }
-    val selected = providers.firstOrNull { it.name == HomeState.selectedName } ?: providers.firstOrNull()
+    val selected = homeProvider(providers, HomeState.selectedName)
     // Offline, there's nothing to fetch; the last page stays on screen, and it reloads when the connection returns
     LaunchedEffect(selected, Network.online) { if (Network.online) selected?.let(HomeState::show) }
     val continueWatching = Library.continueWatching
